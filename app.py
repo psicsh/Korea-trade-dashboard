@@ -248,9 +248,9 @@ html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{background:#f
 @media(max-width:760px){.summary-grid{grid-template-columns:1fr 1fr;gap:10px}.summary-box{min-height:105px;padding:13px}.svalue{font-size:20px}.trade-row{grid-template-columns:minmax(100px,1.2fr) .9fr .9fr}.trade-cell{padding:10px 8px;font-size:12px}}
 </style>""",unsafe_allow_html=True)
 
-st.markdown('<div class="hero"><div class="hero-title">🇰🇷 한국무역 한눈에 보기</div><div class="hero-sub">관세청 확정 통계 · 2026 MTI 20대 품목 · 9대 주요 수출지역</div></div>',unsafe_allow_html=True)
+st.markdown('<div class="hero"><div class="hero-title">🇰🇷 한국무역 한눈에 보기</div><div class="hero-sub">관세청 확정 통계 · 20대 주요 수출품목 · 9대 주요 수출지역</div></div>',unsafe_allow_html=True)
 
-MENU=["🇰🇷 전체 무역","🏭 20대 품목","🌏 9대 지역","🧩 MTI 분류","🔎 관세청 상세조회"]
+MENU=["🇰🇷 전체 무역","🏭 20대 품목","🌏 9대 지역","🔎 관세청 상세조회"]
 page=st.segmented_control("메뉴",MENU,default=MENU[0],selection_mode="single",label_visibility="collapsed") or MENU[0]
 
 m,i,r,status=load_snapshots()
@@ -325,6 +325,7 @@ if page=="🇰🇷 전체 무역":
 
 elif page=="🏭 20대 품목":
     st.subheader(f"2026 MTI 기준 20대 주력 수출품목 · {ind_period}")
+    st.caption("※ 2026년 산업통상부 MTI 개편 기준 · 관세청 HSK 통계를 공식 HSK-MTI 연계표로 재집계")
 
     left,right=st.columns([1.25,1])
     with left:
@@ -359,21 +360,6 @@ elif page=="🌏 9대 지역":
         a,b=st.columns(2)
         a.metric(f"대{sel} 수출",f"{rr['export_usd_100m']:.1f}억 달러")
         b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
-
-elif page=="🧩 MTI 분류":
-    st.subheader("2026 HSK-MTI 연계표")
-    p=DATA/"mti_hsk_mapping.xlsx"
-    if p.exists():
-        try:
-            mp=pd.read_excel(p,sheet_name="HSK-MTI 연계표",dtype=str)
-            counts=(mp[mp["구분"].isin(INDUSTRY_ORDER)]
-                    .groupby("구분")["HSK"].nunique()
-                    .reindex(INDUSTRY_ORDER).fillna(0).astype(int)
-                    .rename("연결 HSK 수").reset_index()
-                    .rename(columns={"구분":"품목"}))
-            st.dataframe(counts,use_container_width=True,hide_index=True)
-        except Exception as e:
-            st.error(str(e))
 
 elif page=="🔎 관세청 상세조회":
     st.subheader("관세청 HS 상세조회")
