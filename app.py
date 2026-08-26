@@ -35,66 +35,78 @@ def get_key():
     except:return None
 
 
-# 공식 HSK 코드표가 상위 4단위 명칭을 제공하지 않을 때 쓰는 보조 명칭.
-HS_COMMON_NAMES = {
-    "8542": "전자집적회로",
-    "8703": "승용자동차 및 기타 차량",
-    "8471": "자동자료처리기계(컴퓨터)",
-    "8517": "전화기 및 기타 통신기기",
-    "8901": "여객선·화물선 등 선박",
-    "2710": "석유와 역청유의 조제품",
-    "3004": "의약품",
-    "8507": "축전지",
-    "3304": "화장품·미용 또는 메이크업용 제품",
-    "8708": "자동차 부분품과 부속품",
-    "9018": "의료용·수의용 기기",
-}
-
 def _digits(v):
     # 정규식 모듈에 의존하지 않고 숫자만 추출
     return "".join(ch for ch in str(v or "").split(".0")[0] if ch.isdigit())
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_hsk_codebook(path_str, file_mtime):
-    """공식 엑셀의 HSK코드표에서 코드와 한글 명칭을 읽는다."""
+    """
+    공식 엑셀의 HSK코드표를 구조가 조금 달라도 읽는다.
+    - 첫 행이 바로 헤더인 경우
+    - 위쪽에 제목/주석행이 있고 몇 행 뒤에 HSK/품명 헤더가 있는 경우
+    모두 지원한다.
+    """
     p = Path(path_str)
-    raw = pd.read_excel(p, sheet_name="HSK코드표", dtype=str)
+    raw = pd.read_excel(p, sheet_name="HSK코드표", header=None, dtype=str)
     if raw.empty:
         return pd.DataFrame(columns=["code","name"])
 
-    cols = [str(c).strip() for c in raw.columns]
-
+    # 첫 30행에서 HSK 코드열과 품명열이 함께 있는 헤더행을 탐색
+    header_row = None
     code_col = None
-    for c in cols:
-        u = c.upper().replace(" ", "")
-        if u in ("HSK","HSK코드","HS코드","HS"):
-            code_col = c
-            break
-    if code_col is None:
-        for c in cols:
-            if "HSK" in c.upper() and "명" not in c:
-                code_col = c
-                break
-
     name_col = None
-    for key_word in ["품명","HSK명","품목명","한글품명","한글명","명칭","품목"]:
-        for c in cols:
-            if (c == key_word or key_word in c) and c != code_col:
-                name_col = c
+
+    for ridx in range(min(30, len(raw))):
+        vals = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[ridx].tolist()]
+        for cidx, val in enumerate(vals):
+            u = val.upper().replace(" ", "")
+            if u in ("HSK","HSK코드","HS코드","HS") or ("HSK" in u and "명" not in u):
+                # 같은 행에서 품명 후보를 찾음
+                for nidx, nval in enumerate(vals):
+                    if nidx == cidx:
+                        continue
+                    nv = nval.replace(" ", "")
+                    if any(k in nv for k in ["품명","품목명","한글품명","한글명","명칭","HSK명"]):
+                        header_row, code_col, name_col = ridx, cidx, nidx
+                        break
+            if header_row is not None:
                 break
-        if name_col:
+        if header_row is not None:
             break
 
-    if code_col is None or name_col is None:
+    # 헤더명이 비정형이면 각 열 내용 패턴으로 자동 추정
+    if header_row is None:
+        best_code = (-1, None)
+        best_name = (-1, None)
+
+        for cidx in range(raw.shape[1]):
+            s = raw.iloc[:, cidx].fillna("").astype(str).str.strip()
+            digit_score = s.map(lambda x: _digits(x)).str.fullmatch(r"\d{2,10}", na=False).sum()
+            if digit_score > best_code[0]:
+                best_code = (int(digit_score), cidx)
+
+            # 한글이 많이 들어 있고 숫자코드 열이 아닌 열을 품명 후보로 판단
+            text_score = s.map(lambda x: any("가" <= ch <= "힣" for ch in x)).sum()
+            if text_score > best_name[0]:
+                best_name = (int(text_score), cidx)
+
+        code_col = best_code[1]
+        name_col = best_name[1]
+        header_row = -1
+
+    if code_col is None or name_col is None or code_col == name_col:
         return pd.DataFrame(columns=["code","name"])
 
-    d = raw[[code_col,name_col]].copy()
+    d = raw.iloc[header_row+1 if header_row >= 0 else 0:, [code_col, name_col]].copy()
     d.columns = ["code","name"]
     d["code"] = d["code"].map(_digits)
-    d["name"] = d["name"].astype(str).str.strip()
-    d = d[d["code"].str.fullmatch(r"\d{2,10}", na=False)]
-    d = d[~d["name"].isin(["","nan","None"])]
-    return d.drop_duplicates(["code","name"])
+    d["name"] = d["name"].fillna("").astype(str).str.strip()
+
+    # 2/4/6/10단위 코드 모두 보존
+    d = d[d["code"].str.fullmatch(r"\d{2}|\d{4}|\d{6}|\d{10}", na=False)]
+    d = d[~d["name"].isin(["","nan","None","-"])]
+    return d.drop_duplicates(["code","name"]).reset_index(drop=True)
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_hsk_mti_lookup(path_str, file_mtime):
@@ -111,37 +123,49 @@ def load_hsk_mti_lookup(path_str, file_mtime):
     return d[["hsk","industry"]].drop_duplicates()
 
 def lookup_hs_info(hs):
-    """API 호출 없이 로컬 공식 코드표에서 HS 명칭과 관련 MTI를 즉시 찾는다."""
+    """
+    API 호출 없이 공식 HSK 코드표에서 명칭을 즉시 찾는다.
+
+    반환:
+      exact_name: 입력 코드와 정확히 일치하는 공식 품명(있을 때)
+      groups: 관련 20대 MTI 품목
+      examples: 상위코드 입력 시 관련 세부품목 대표명 최대 3개
+      matched_count: 입력 prefix와 일치하는 코드 수
+    """
     code = _digits(hs)
     if not code:
-        return None, []
+        return None, [], [], 0
 
-    name = None
+    exact_name = None
     groups = []
+    examples = []
+    matched_count = 0
     p = DATA / "mti_hsk_mapping.xlsx"
 
-    if p.exists():
-        try:
-            cb = load_hsk_codebook(str(p), p.stat().st_mtime_ns)
-            exact = cb[cb["code"] == code]
-            if not exact.empty:
-                name = str(exact.iloc[0]["name"])
-            else:
-                matched = cb[cb["code"].str.startswith(code, na=False)]
-                unique_names = matched["name"].dropna().drop_duplicates().tolist()
-                if len(unique_names) == 1:
-                    name = unique_names[0]
+    if not p.exists():
+        return None, [], [], 0
 
-            mp = load_hsk_mti_lookup(str(p), p.stat().st_mtime_ns)
-            matched_mp = mp[mp["hsk"].str.startswith(code, na=False)]
-            groups = matched_mp["industry"].drop_duplicates().tolist()
-        except Exception:
-            pass
+    try:
+        cb = load_hsk_codebook(str(p), p.stat().st_mtime_ns)
 
-    if not name:
-        name = HS_COMMON_NAMES.get(code)
+        exact = cb[cb["code"] == code]
+        if not exact.empty:
+            exact_name = str(exact.iloc[0]["name"])
 
-    return name, groups
+        # 4/6단위처럼 정확한 상위품명이 없더라도 세부코드에서 대표 품명을 표시
+        matched = cb[cb["code"].str.startswith(code, na=False)].copy()
+        matched_count = len(matched)
+        if not matched.empty:
+            examples = matched["name"].dropna().drop_duplicates().head(3).tolist()
+
+        mp = load_hsk_mti_lookup(str(p), p.stat().st_mtime_ns)
+        matched_mp = mp[mp["hsk"].str.startswith(code, na=False)]
+        groups = matched_mp["industry"].drop_duplicates().tolist()
+
+    except Exception:
+        pass
+
+    return exact_name, groups, examples, matched_count
 
 def to_num(v):
     try:return float(str(v).replace(",",""))
@@ -358,22 +382,28 @@ elif page=="🔎 관세청 상세조회":
     hs=st.text_input("HS 코드",value="8542",help="예: 8542 전자집적회로, 8703 승용자동차")
 
     hs_code=_digits(hs)
-    hs_name,hs_groups=lookup_hs_info(hs_code)
+    hs_name,hs_groups,hs_examples,hs_match_count=lookup_hs_info(hs_code)
 
     if hs_code:
         title=f"HS {hs_code}"
         if hs_name:
             title += f" · {hs_name}"
 
-        group_note=""
+        notes=[]
+        if not hs_name and hs_examples:
+            notes.append("대표 세부품목: " + " / ".join(hs_examples))
         if hs_groups:
-            shown=" · ".join(hs_groups[:3])
-            if len(hs_groups)>3:
+            shown=" · ".join(hs_groups[:4])
+            if len(hs_groups)>4:
                 shown += " 외"
-            group_note=f'<div class="hs-sub">관련 MTI: {shown}</div>'
+            notes.append("관련 MTI: " + shown)
+        if hs_match_count and not hs_name:
+            notes.append(f"관련 HSK 세부코드 {hs_match_count:,}개")
+
+        note_html="".join(f'<div class="hs-sub">{n}</div>' for n in notes)
 
         st.markdown(
-            f'<div class="hs-name-card"><div class="hs-code-title">{title}</div>{group_note}</div>',
+            f'<div class="hs-name-card"><div class="hs-code-title">{title}</div>{note_html}</div>',
             unsafe_allow_html=True
         )
 
