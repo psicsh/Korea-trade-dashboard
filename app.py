@@ -52,6 +52,22 @@ def get_key():
     except:
         return None
 
+def render_trade_table(df, name_col):
+    rows = ['<div class="trade-table">',
+            '<div class="trade-row header"><div class="trade-cell">구분</div><div class="trade-cell num">수출액(억 달러)</div><div class="trade-cell num">전년동월 대비</div></div>']
+    for _, rr in df.iterrows():
+        yoy=float(rr["yoy"])
+        cls="positive" if yoy >= 0 else "negative"
+        rows.append(
+            f'<div class="trade-row">'
+            f'<div class="trade-cell name">{rr[name_col]}</div>'
+            f'<div class="trade-cell num">{float(rr["export_usd_100m"]):,.1f}</div>'
+            f'<div class="trade-cell num {cls}">{yoy:+.1f}%</div>'
+            f'</div>'
+        )
+    rows.append('</div>')
+    st.markdown("".join(rows), unsafe_allow_html=True)
+
 def to_num(v):
     try:return float(str(v).replace(",",""))
     except:return 0.0
@@ -66,8 +82,12 @@ def api_get(url,key,params_tuple):
     return [{c.tag:c.text for c in x} for x in root.findall(".//item")]
 
 def recent_window():
+    # 진행 중인 당월은 월별 비교에서 제외한다.
+    # 예: 2026-08-26이면 2025-08~2026-07의 12개 완결월을 조회.
     now=pd.Period(date.today().strftime("%Y-%m"),freq="M")
-    return (now-11).strftime("%Y%m"),now.strftime("%Y%m")
+    end=now-1
+    start=end-11
+    return start.strftime("%Y%m"),end.strftime("%Y%m")
 
 def customs_total(key):
     s,e=recent_window()
@@ -103,6 +123,30 @@ st.markdown("""
 .note{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:12px;padding:11px 13px;font-size:13px;line-height:1.5}
 .ok{background:#ecfdf3;border:1px solid #a6f4c5;color:#027a48;border-radius:12px;padding:11px 13px;font-size:13px;line-height:1.5}
 .source{background:#f8fafc;border:1px solid #e2e8f0;color:#475467;border-radius:12px;padding:11px 13px;font-size:12px;line-height:1.5}
+.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0 4px}
+.summary-box{background:#f8fafc;border:1px solid #dfe5ee;border-radius:13px;padding:14px}
+.summary-box .slabel{font-size:12px;color:#667085;font-weight:700}
+.summary-box .svalue{font-size:24px;font-weight:850;margin-top:6px;color:#18202a}
+.summary-box .snote{font-size:12px;color:#475467;margin-top:4px;line-height:1.35}
+.trade-table{width:100%;border:1px solid #dfe5ee;border-radius:14px;overflow:hidden;background:#f8fafc}
+.trade-row{display:grid;grid-template-columns:minmax(120px,1.2fr) 1fr 1fr;align-items:center;border-bottom:1px solid #e5eaf1;background:#f8fafc}
+.trade-row:last-child{border-bottom:0}
+.trade-row.header{background:#eaf0f7;font-size:12px;font-weight:800;color:#475467}
+.trade-cell{padding:11px 13px;font-size:14px}
+.trade-cell.name{font-weight:800;color:#18202a}
+.trade-cell.num{text-align:right;font-variant-numeric:tabular-nums}
+.positive{color:#067647;font-weight:800}
+.negative{color:#b42318;font-weight:800}
+@media(max-width:760px){
+  .summary-grid{grid-template-columns:1fr 1fr}
+  .trade-row{grid-template-columns:minmax(100px,1.2fr) .9fr .9fr}
+  .trade-cell{padding:10px 8px;font-size:12px}
+  .trade-row.header .trade-cell{font-size:11px}
+}
+@media(max-width:430px){
+  .summary-grid{grid-template-columns:1fr 1fr}
+  .summary-box .svalue{font-size:20px}
+}
 </style>
 """,unsafe_allow_html=True)
 
@@ -128,8 +172,8 @@ with tab_all:
     st.subheader(f"대한민국 무역 Dashboard · {latest_period}")
     c1,c2,c3,c4=st.columns(4)
     vals=[
-        ("수출",f"{latest['export_usd_100m']:,.1f}억 달러",f"{latest['export_yoy']:+.1f}%"),
-        ("수입",f"{latest['import_usd_100m']:,.1f}억 달러",f"{latest['import_yoy']:+.1f}%"),
+        ("수출",f"{latest['export_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latest['export_yoy']:+.1f}%"),
+        ("수입",f"{latest['import_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latest['import_yoy']:+.1f}%"),
         ("무역수지",f"{latest['balance_usd_100m']:+,.1f}억 달러",str(latest["status"])),
         ("일평균 수출",f"{latest['daily_export_usd_100m']:,.1f}억 달러","산업부 잠정치"),
     ]
@@ -142,26 +186,32 @@ with tab_all:
     top_growth = latest_i.sort_values("yoy", ascending=False).iloc[0]
     top_export = latest_i.sort_values("export_usd_100m", ascending=False).iloc[0]
     reg_growth = latest_r[latest_r["yoy"] > 0]["region"].tolist()
-    reg_down = latest_r[latest_r["yoy"] <= 0]["region"].tolist()
-
-    h1,h2,h3,h4 = st.columns(4)
-    h1.metric("20대 품목 증가", f"{inc_count}개 / 20개")
-    h2.metric("최대 수출 품목", str(top_export["industry"]), f"{top_export['export_usd_100m']:.1f}억 달러")
-    h3.metric("증가율 1위", str(top_growth["industry"]), f"{top_growth['yoy']:+.1f}%")
-    if reg_down:
-        h4.metric("감소 지역", " · ".join(reg_down), f"나머지 {len(reg_growth)}개 지역 증가")
+    reg_down_df = latest_r[latest_r["yoy"] <= 0].sort_values("yoy")
+    if not reg_down_df.empty:
+        down_region = str(reg_down_df.iloc[0]["region"])
+        down_yoy = float(reg_down_df.iloc[0]["yoy"])
+        down_value = down_region
+        down_note = f"전년동월 대비 {down_yoy:+.1f}% · 나머지 {len(reg_growth)}개 지역 증가"
     else:
-        h4.metric("9대 지역", "모두 증가", "")
+        down_value = "없음"
+        down_note = "9대 지역 모두 전년동월 대비 증가"
 
-    st.caption("※ 산업부 최신 월간 수출입동향의 잠정치를 바탕으로 자동 요약합니다.")
+    st.markdown(
+        f'<div class="summary-grid">'
+        f'<div class="summary-box"><div class="slabel">20대 품목 증가</div><div class="svalue">{inc_count}개 / 20개</div><div class="snote">전년동월 대비</div></div>'
+        f'<div class="summary-box"><div class="slabel">최대 수출 품목</div><div class="svalue">{top_export["industry"]}</div><div class="snote">수출액 {top_export["export_usd_100m"]:.1f}억 달러</div></div>'
+        f'<div class="summary-box"><div class="slabel">증가율 1위</div><div class="svalue">{top_growth["industry"]}</div><div class="snote">전년동월 대비 {top_growth["yoy"]:+.1f}%</div></div>'
+        f'<div class="summary-box"><div class="slabel">감소 지역</div><div class="svalue">{down_value}</div><div class="snote">{down_note}</div></div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+    st.caption("※ 산업부 최신 월간 수출입동향의 잠정치를 바탕으로 요약합니다.")
     st.write("")
 
     if len(m)>1:
         ch=m.set_index("period")[["export_usd_100m","import_usd_100m"]]
         ch.columns=["수출(억 달러)","수입(억 달러)"]
         st.line_chart(ch,height=330)
-    else:
-        st.info("자동 갱신이 누적되면 이곳에 산업부 월별 시계열 그래프가 쌓입니다.")
 
     key=get_key()
     if key:
@@ -180,9 +230,8 @@ with tab_ind:
     st.caption(f"현행 MTI 기준 · 최신 {latest_period}")
     left,right=st.columns([1.25,1])
     with left:
-        show=latest_i[["industry","export_usd_100m","yoy"]].copy()
-        show.columns=["품목","수출액(억 달러)","전년동월비(%)"]
-        st.dataframe(show.sort_values("수출액(억 달러)",ascending=False),use_container_width=True,hide_index=True,height=530)
+        show=latest_i[["industry","export_usd_100m","yoy"]].copy().sort_values("export_usd_100m",ascending=False)
+        render_trade_table(show, "industry")
     with right:
         st.bar_chart(latest_i.set_index("industry")["export_usd_100m"].sort_values(ascending=False),height=480)
 
@@ -201,12 +250,24 @@ with tab_ind:
 with tab_reg:
     st.subheader("산업통상부 9대 주요 수출지역")
     show=latest_r[["region","export_usd_100m","yoy"]].copy()
-    show.columns=["지역","수출액(억 달러)","전년동월비(%)"]
     c1,c2=st.columns([1,1])
-    c1.dataframe(show,use_container_width=True,hide_index=True,height=390)
+    with c1:
+        render_trade_table(show, "region")
     with c2:
         st.bar_chart(latest_r.set_index("region")["export_usd_100m"].sort_values(ascending=False),height=360)
-    selected=st.selectbox("지역",latest_r["region"].tolist(),key="region_select")
+
+    st.markdown("### 지역 상세")
+    selected=st.selectbox("지역 선택",latest_r["region"].tolist(),key="region_select")
+    rr=latest_r[latest_r["region"]==selected].iloc[-1]
+    yoy_val=float(rr["yoy"])
+    yoy_cls="positive" if yoy_val >= 0 else "negative"
+    st.markdown(
+        f'<div class="summary-grid">'
+        f'<div class="summary-box"><div class="slabel">대{selected} 수출</div><div class="svalue">{float(rr["export_usd_100m"]):,.1f}억 달러</div><div class="snote">최신 {latest_period}</div></div>'
+        f'<div class="summary-box"><div class="slabel">증감률</div><div class="svalue {yoy_cls}">{yoy_val:+.1f}%</div><div class="snote">전년동월 대비</div></div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
     hist=r[r["region"]==selected].sort_values("period")
     if len(hist)>1:
         st.line_chart(hist.set_index("period")[["export_usd_100m"]],height=280)
