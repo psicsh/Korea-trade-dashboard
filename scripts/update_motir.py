@@ -3,7 +3,7 @@
 산업통상부 월간 '수출입 동향' 자동 업데이트.
 
 동작:
-1) 산업통상부 보도자료 목록 최근 페이지에서 최신 'YYYY년 M월 ... 수출입 동향' 검색
+1) 산업통상부 보도자료 목록 최근 페이지에서 최신 'YYYY년 M월 ... 수출입 동향' 검색\n   - javascript:article.view('글번호') 링크를 실제 상세 URL로 자동 변환
 2) 상세 HTML + 첨부 PDF 텍스트를 결합
 3) 총괄, 20대 주력품목, 9대 주요지역 숫자 추출
 4) 20/20 + 9/9 검증을 통과할 때만 CSV 갱신
@@ -69,6 +69,29 @@ def period_from_title(title):
         return None
     return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
 
+def normalize_article_url(anchor, base_url):
+    """
+    산업통상부 목록은 상세글 링크를 일반 URL이 아니라
+    javascript:article.view('172077'); 형식으로 제공하는 경우가 있다.
+    이 경우 글 번호를 추출해 실제 상세 URL로 변환한다.
+    """
+    raw = (anchor.get("href") or "").strip()
+    onclick = (anchor.get("onclick") or "").strip()
+    probe = raw + " " + onclick
+
+    # javascript:article.view('172077'); 또는 onclick="article.view('172077')"
+    m = re.search(r"article\.view\(\s*['\"]?(\d+)['\"]?\s*\)", probe, re.I)
+    if m:
+        article_id = m.group(1)
+        return f"{LIST_URL}/{article_id}/view"
+
+    # 이미 정상적인 상세 URL인 경우
+    if raw and not raw.lower().startswith("javascript:") and raw != "#":
+        return urljoin(base_url, raw)
+
+    return None
+
+
 def discover_latest():
     found = []
     # 한 달치 보도자료가 뒤로 밀릴 수 있어 최근 10페이지 탐색
@@ -76,23 +99,40 @@ def discover_latest():
         r = session.get(LIST_URL, params={"pageIndex":page}, timeout=30)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
+
+        # href뿐 아니라 onclick에 article.view가 들어간 경우도 잡기 위해 모든 a 태그 확인
+        for a in soup.find_all("a"):
             title = " ".join(a.get_text(" ", strip=True).split())
             period = period_from_title(title)
             if not period:
                 continue
-            # ICT/자동차산업 등 별도 동향은 제목 정규식에서 대체로 제외되지만 추가 방어
+
+            # ICT/자동차산업 등 별도 동향은 제외
             if "정보통신" in title or "ICT" in title or "자동차산업" in title:
                 continue
-            href = urljoin(r.url, a["href"])
+
+            href = normalize_article_url(a, r.url)
+            if not href:
+                print(f"[WARN] 상세 URL 해석 실패: {title} / href={a.get('href')}", file=sys.stderr)
+                continue
+
             found.append((period, title, href))
+
     if not found:
         raise RuntimeError("산업통상부 목록에서 월간 '수출입 동향'을 찾지 못했습니다.")
-    # 같은 글이 중복 수집되면 URL 기준 중복제거
+
+    # 같은 글이 중복 수집되면 URL 기준 중복 제거
     uniq = {}
-    for p,t,u in found:
-        uniq[u] = (p,t,u)
-    return max(uniq.values(), key=lambda x:x[0])
+    for p, t, u in found:
+        uniq[u] = (p, t, u)
+
+    latest = max(uniq.values(), key=lambda x: x[0])
+
+    # javascript: URL이 남아 있으면 여기서 즉시 중단하여 원인을 명확히 표시
+    if latest[2].lower().startswith("javascript:"):
+        raise RuntimeError(f"상세 URL 변환 실패: {latest[2]}")
+
+    return latest
 
 def extract_pdf_text(soup, detail_url):
     texts = []
