@@ -3,7 +3,7 @@
 산업통상부 월간 '수출입 동향' 자동 업데이트.
 
 동작:
-1) 산업통상부 보도자료 목록 최근 페이지에서 최신 'YYYY년 M월 ... 수출입 동향' 검색\n   - javascript:article.view('글번호') 링크를 실제 상세 URL로 자동 변환
+1) 산업통상부 보도자료에서 최신 월간 수출입 동향 검색\n   - 산업통상부 접속 장애 시 한국무역협회 FTA 통합플랫폼 재게시 자료로 자동 전환
 2) 상세 HTML + 첨부 PDF 텍스트를 결합
 3) 총괄, 20대 주력품목, 9대 주요지역 숫자 추출
 4) 20/20 + 9/9 검증을 통과할 때만 CSV 갱신
@@ -25,6 +25,7 @@ from pypdf import PdfReader
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 LIST_URL = "https://www.motir.go.kr/kor/article/ATCL3f49a5a8c"
+KITA_LIST_URL = "https://okfta.kita.net/nttCntnt/list?mnSn=38"
 
 INDUSTRIES = [
     "반도체","자동차","자동차부품","석유제품","석유화학","일반기계","철강","선박",
@@ -55,6 +56,44 @@ session = requests.Session()
 session.headers.update({
     "User-Agent":"Mozilla/5.0 (compatible; KoreaTradeLectureBot/1.0; educational use)"
 })
+
+BUILD_ID = "v8.8.1-final-20260826"
+
+def normalize_download_url(raw_href, base_url):
+    """
+    산업통상부 첨부파일 링크가
+    javascript:location.href='/attach/down/...'
+    형태여도 실제 다운로드 URL로 변환한다.
+    """
+    raw = (raw_href or "").strip()
+    if not raw:
+        return None
+
+    # 일반 URL
+    if not raw.lower().startswith("javascript:"):
+        return urljoin(base_url, raw)
+
+    # javascript:location.href='/attach/down/...'
+    m = re.search(
+        r"""location\.href\s*=\s*['"]([^'"]+)['"]""",
+        raw,
+        re.I,
+    )
+    if m:
+        return urljoin(base_url, m.group(1))
+
+    # 혹시 window.location / location.assign 형태도 대비
+    m = re.search(
+        r"""(?:window\.)?location(?:\.assign)?\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+        raw,
+        re.I,
+    )
+    if m:
+        return urljoin(base_url, m.group(1))
+
+    return None
+
+
 
 def clean_text(s):
     s = s.replace("\u00a0"," ").replace("△","-").replace("▲","+").replace("▼","-")
@@ -92,46 +131,112 @@ def normalize_article_url(anchor, base_url):
     return None
 
 
-def discover_latest():
+def discover_latest_motir():
+    """산업통상부 원문을 우선 탐색. 접속 장애가 나면 호출자가 KITA로 전환한다."""
     found = []
-    # 한 달치 보도자료가 뒤로 밀릴 수 있어 최근 10페이지 탐색
-    for page in range(1, 11):
-        r = session.get(LIST_URL, params={"pageIndex":page}, timeout=30)
+    # 최신 월간자료는 보통 앞쪽에 있으므로 3페이지만 확인해
+    # GitHub Actions에서 외부사이트 지연이 길어지는 것을 막는다.
+    for page in range(1, 4):
+        r = session.get(LIST_URL, params={"pageIndex": page}, timeout=(10, 20))
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # href뿐 아니라 onclick에 article.view가 들어간 경우도 잡기 위해 모든 a 태그 확인
         for a in soup.find_all("a"):
             title = " ".join(a.get_text(" ", strip=True).split())
             period = period_from_title(title)
             if not period:
                 continue
-
-            # ICT/자동차산업 등 별도 동향은 제외
             if "정보통신" in title or "ICT" in title or "자동차산업" in title:
                 continue
 
             href = normalize_article_url(a, r.url)
             if not href:
-                print(f"[WARN] 상세 URL 해석 실패: {title} / href={a.get('href')}", file=sys.stderr)
                 continue
-
             found.append((period, title, href))
 
     if not found:
-        raise RuntimeError("산업통상부 목록에서 월간 '수출입 동향'을 찾지 못했습니다.")
+        raise RuntimeError("산업통상부 목록에서 월간 수출입 동향을 찾지 못했습니다.")
 
-    # 같은 글이 중복 수집되면 URL 기준 중복 제거
-    uniq = {}
-    for p, t, u in found:
-        uniq[u] = (p, t, u)
+    uniq = {u: (p, t, u) for p, t, u in found}
+    return max(uniq.values(), key=lambda x: x[0])
 
-    latest = max(uniq.values(), key=lambda x: x[0])
 
-    # javascript: URL이 남아 있으면 여기서 즉시 중단하여 원인을 명확히 표시
-    if latest[2].lower().startswith("javascript:"):
-        raise RuntimeError(f"상세 URL 변환 실패: {latest[2]}")
+def normalize_kita_url(anchor, base_url):
+    """KITA 목록의 일반 링크 또는 자바스크립트 링크를 상세 URL로 변환."""
+    raw = (anchor.get("href") or "").strip()
+    onclick = (anchor.get("onclick") or "").strip()
+    probe = raw + " " + onclick
 
+    if raw and not raw.lower().startswith("javascript:") and raw != "#":
+        return urljoin(base_url, raw)
+
+    # 예: javascript:...('10184') / fnView(10184) 등
+    m = re.search(r"(?:view|fnView|nttCntnt)[^0-9]{0,30}(\d{4,})", probe, re.I)
+    if m:
+        return f"https://okfta.kita.net/nttCntnt/view/{m.group(1)}?mnSn=38"
+
+    return None
+
+
+def discover_latest_kita():
+    """
+    한국무역협회 FTA 통합플랫폼의 '시장정보'는 산업통상부 월간
+    수출입 동향 원문과 첨부 PDF를 재게시한다. MOTIR 접속 실패 시 사용.
+    """
+    r = session.get(KITA_LIST_URL, timeout=(10, 25))
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    found = []
+
+    for a in soup.find_all("a"):
+        title = " ".join(a.get_text(" ", strip=True).split())
+        period = period_from_title(title)
+        if not period:
+            continue
+        if "정보통신" in title or "ICT" in title or "자동차산업" in title:
+            continue
+
+        href = normalize_kita_url(a, r.url)
+        if href:
+            found.append((period, title, href))
+
+    if not found:
+        # 일부 사이트 개편 시 제목이 링크 바깥에 있을 수 있으므로
+        # HTML 전체에서 상세글 번호가 붙은 주변 텍스트를 한 번 더 탐색한다.
+        html = r.text
+        for m in re.finditer(r"(20\d{2}년\s*\d{1,2}월(?:\s*및\s*상반기)?\s*수출입\s*동향)", html):
+            title = re.sub(r"<[^>]+>", " ", m.group(1))
+            title = " ".join(title.split())
+            period = period_from_title(title)
+            if not period:
+                continue
+            around = html[max(0, m.start()-500):m.end()+500]
+            idm = re.search(r"/nttCntnt/view/(\d+)", around)
+            if idm:
+                found.append(
+                    (period, title,
+                     f"https://okfta.kita.net/nttCntnt/view/{idm.group(1)}?mnSn=38")
+                )
+
+    if not found:
+        raise RuntimeError("KITA FTA 통합플랫폼에서도 월간 수출입 동향을 찾지 못했습니다.")
+
+    uniq = {u: (p, t, u) for p, t, u in found}
+    return max(uniq.values(), key=lambda x: x[0])
+
+
+def discover_latest():
+    """산업통상부 원문 우선, 장애 시 KITA 공식 재게시 자료로 자동 전환."""
+    try:
+        latest = discover_latest_motir()
+        print("[INFO] 자료원: 산업통상부 원문")
+        return latest
+    except Exception as e:
+        print(f"[WARN] 산업통상부 직접 접속 실패 → KITA로 전환: {type(e).__name__}: {e}",
+              file=sys.stderr)
+
+    latest = discover_latest_kita()
+    print("[INFO] 자료원: 한국무역협회 FTA 통합플랫폼(산업통상부 자료 재게시)")
     return latest
 
 def extract_pdf_text(soup, detail_url):
@@ -146,7 +251,7 @@ def extract_pdf_text(soup, detail_url):
     # 같은 링크 중복 제거
     for href in dict.fromkeys(candidates):
         try:
-            rr = session.get(href, timeout=45)
+            rr = session.get(href, timeout=(10, 35))
             rr.raise_for_status()
             content = rr.content
             # HTML 미리보기 링크면 건너뜀
@@ -160,13 +265,58 @@ def extract_pdf_text(soup, detail_url):
             print(f"[WARN] PDF 추출 실패: {href} / {e}", file=sys.stderr)
     return "\n".join(texts)
 
+
+
 def get_detail(url):
-    r = session.get(url, timeout=30)
+    r = session.get(url, timeout=(10, 30))
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    html_text = soup.get_text("\n", strip=True)
-    pdf_text = extract_pdf_text(soup, r.url)
-    return clean_text(html_text + "\n" + pdf_text), soup
+    page_text = soup.get_text("\n", strip=True)
+
+    pdf_texts = []
+    for a in soup.find_all("a"):
+        href_raw = a.get("href") or ""
+        label = " ".join(a.get_text(" ", strip=True).split())
+        probe = f"{href_raw} {label}".lower()
+
+        # PDF 첨부 또는 /attach/down/ 형태의 다운로드 링크만 시도
+        if ".pdf" not in probe and "/attach/down/" not in probe:
+            continue
+
+        href = normalize_download_url(href_raw, r.url)
+        if not href:
+            print(f"[WARN] PDF 링크 해석 실패: {href_raw}", file=sys.stderr)
+            continue
+
+        try:
+            rr = session.get(href, timeout=(10, 35))
+            rr.raise_for_status()
+            ctype = (rr.headers.get("content-type") or "").lower()
+
+            # 확장자가 없어도 실제 PDF 응답이면 처리
+            if "pdf" in ctype or rr.content[:4] == b"%PDF":
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+                    tf.write(rr.content)
+                    tmp = tf.name
+                try:
+                    reader = PdfReader(tmp)
+                    txt = "\n".join((p.extract_text() or "") for p in reader.pages)
+                    if txt.strip():
+                        pdf_texts.append(txt)
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+        except Exception as e:
+            print(f"[WARN] PDF 추출 실패: {href_raw} / {e}", file=sys.stderr)
+
+    # HTML 본문 + PDF 추출문을 함께 파싱 대상으로 사용
+    combined = page_text
+    if pdf_texts:
+        combined += "\n\n" + "\n\n".join(pdf_texts)
+
+    return combined
 
 def num(s):
     return float(str(s).replace(",","").replace("+","").strip())
