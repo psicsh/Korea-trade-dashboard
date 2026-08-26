@@ -1,0 +1,15 @@
+2026 MTI-HSK 공식 연계표를 이 폴더에 한 번만 넣으세요.
+
+공식 파일명:
+2026 MTI-HSK 코드표_vFF_260507.xlsx
+
+GitHub 저장 시 권장 파일명:
+mti_hsk_mapping.xlsx
+
+출처:
+한국무역협회 보도자료
+'무협, 수출입 품목분류(MTI) 개편사항 6월 무역통계 서비스 반영'
+https://www.kita.net/board/pressData/pressDataDetail.do?no=12102
+
+이 파일은 매월 교체하는 파일이 아닙니다.
+MTI/HSK 체계가 다시 개편될 때만 새 연계표로 교체하면 됩니다.
