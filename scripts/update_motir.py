@@ -57,7 +57,7 @@ session.headers.update({
     "User-Agent":"Mozilla/5.0 (compatible; KoreaTradeLectureBot/1.0; educational use)"
 })
 
-BUILD_ID = "v8.8.1-final-20260826"
+BUILD_ID = "v8.9-final-20260826"
 
 def normalize_download_url(raw_href, base_url):
     """
@@ -132,15 +132,20 @@ def normalize_article_url(anchor, base_url):
 
 
 def discover_latest_motir():
-    """산업통상부 원문을 우선 탐색. 접속 장애가 나면 호출자가 KITA로 전환한다."""
+    """산업통상부 원문을 우선 탐색. 페이지별 오류는 건너뛰고 최대 10페이지 확인."""
     found = []
-    # 최신 월간자료는 보통 앞쪽에 있으므로 3페이지만 확인해
-    # GitHub Actions에서 외부사이트 지연이 길어지는 것을 막는다.
-    for page in range(1, 4):
-        r = session.get(LIST_URL, params={"pageIndex": page}, timeout=(10, 20))
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+    errors = []
 
+    for page in range(1, 11):
+        try:
+            r = session.get(LIST_URL, params={"pageIndex": page}, timeout=(8, 18))
+            r.raise_for_status()
+        except Exception as e:
+            errors.append(f"page {page}: {type(e).__name__}")
+            print(f"[WARN] 산업통상부 목록 page {page} 접속 실패: {e}", file=sys.stderr)
+            continue
+
+        soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.find_all("a"):
             title = " ".join(a.get_text(" ", strip=True).split())
             period = period_from_title(title)
@@ -150,80 +155,114 @@ def discover_latest_motir():
                 continue
 
             href = normalize_article_url(a, r.url)
-            if not href:
-                continue
-            found.append((period, title, href))
+            if href:
+                found.append((period, title, href))
 
     if not found:
-        raise RuntimeError("산업통상부 목록에서 월간 수출입 동향을 찾지 못했습니다.")
+        detail = ", ".join(errors[:5]) if errors else "제목 일치 자료 없음"
+        raise RuntimeError(f"산업통상부 목록에서 월간 수출입 동향을 찾지 못했습니다. ({detail})")
 
     uniq = {u: (p, t, u) for p, t, u in found}
     return max(uniq.values(), key=lambda x: x[0])
 
+def _kita_candidate_ids(fragment):
+    """
+    KITA 목록의 링크/onclick/행 HTML에서 상세글 후보 번호를 넓게 수집한다.
+    후보가 틀려도 실제 상세페이지 제목을 다시 검증하므로 안전하다.
+    """
+    s = str(fragment or "")
+    ids = []
 
-def normalize_kita_url(anchor, base_url):
-    """KITA 목록의 일반 링크 또는 자바스크립트 링크를 상세 URL로 변환."""
-    raw = (anchor.get("href") or "").strip()
-    onclick = (anchor.get("onclick") or "").strip()
-    probe = raw + " " + onclick
+    # URL에 명시된 view 번호를 최우선
+    for m in re.finditer(r"/nttCntnt/view/(\d{4,8})", s, re.I):
+        ids.append(m.group(1))
 
-    if raw and not raw.lower().startswith("javascript:") and raw != "#":
-        return urljoin(base_url, raw)
+    # 속성/자바스크립트 안의 4~8자리 정수 후보
+    for m in re.finditer(r"(?<!\d)(\d{4,8})(?!\d)", s):
+        v = m.group(1)
+        # 연도, 날짜 성분, 게시판 목록번호처럼 보이는 값은 우선 제외
+        if 1990 <= int(v) <= 2100:
+            continue
+        ids.append(v)
 
-    # 예: javascript:...('10184') / fnView(10184) 등
-    m = re.search(r"(?:view|fnView|nttCntnt)[^0-9]{0,30}(\d{4,})", probe, re.I)
-    if m:
-        return f"https://okfta.kita.net/nttCntnt/view/{m.group(1)}?mnSn=38"
+    # 순서 유지 중복제거
+    seen = set()
+    return [x for x in ids if not (x in seen or seen.add(x))]
 
-    return None
+
+def _verify_kita_candidate(article_id, expected_period):
+    url = f"https://okfta.kita.net/nttCntnt/view/{article_id}?mnSn=38"
+    try:
+        rr = session.get(url, timeout=(8, 18))
+        rr.raise_for_status()
+    except Exception:
+        return None
+
+    txt = BeautifulSoup(rr.text, "html.parser").get_text(" ", strip=True)
+    period = period_from_title(txt)
+    if period != expected_period:
+        return None
+
+    # ICT 등 별도 동향 오인 방지
+    if ("정보통신산업" in txt or "ICT 수출입 동향" in txt) and "시장정보" not in txt[:300]:
+        return None
+
+    return url
 
 
 def discover_latest_kita():
     """
-    한국무역협회 FTA 통합플랫폼의 '시장정보'는 산업통상부 월간
-    수출입 동향 원문과 첨부 PDF를 재게시한다. MOTIR 접속 실패 시 사용.
+    KITA FTA 통합플랫폼 목록에서 월간 수출입 동향을 찾는다.
+    목록 DOM 구조가 바뀌어도 제목 주변의 숫자 후보를 실제 상세 URL로
+    하나씩 검증해 올바른 글만 채택한다.
     """
-    r = session.get(KITA_LIST_URL, timeout=(10, 25))
+    r = session.get(KITA_LIST_URL, timeout=(8, 20))
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     found = []
 
-    for a in soup.find_all("a"):
-        title = " ".join(a.get_text(" ", strip=True).split())
+    # 1) 제목이 들어 있는 a/tr/li/div 등 가까운 컨테이너에서 후보 ID 추출
+    for node in soup.find_all(["a", "tr", "li", "div"]):
+        title = " ".join(node.get_text(" ", strip=True).split())
         period = period_from_title(title)
         if not period:
             continue
         if "정보통신" in title or "ICT" in title or "자동차산업" in title:
             continue
 
-        href = normalize_kita_url(a, r.url)
-        if href:
-            found.append((period, title, href))
+        # 컨테이너가 너무 크면 페이지 전체 div가 잡힐 수 있으므로 제한
+        frag = str(node)
+        if len(frag) > 12000:
+            continue
 
+        for cid in _kita_candidate_ids(frag):
+            url = _verify_kita_candidate(cid, period)
+            if url:
+                found.append((period, title, url))
+                break
+
+    # 2) 그래도 못 찾으면 HTML 전체에서 'YYYY년 M월 수출입 동향' 주변을 넓게 검사
     if not found:
-        # 일부 사이트 개편 시 제목이 링크 바깥에 있을 수 있으므로
-        # HTML 전체에서 상세글 번호가 붙은 주변 텍스트를 한 번 더 탐색한다.
         html = r.text
-        for m in re.finditer(r"(20\d{2}년\s*\d{1,2}월(?:\s*및\s*상반기)?\s*수출입\s*동향)", html):
-            title = re.sub(r"<[^>]+>", " ", m.group(1))
-            title = " ".join(title.split())
+        title_pat = re.compile(r"(20\d{2}년\s*\d{1,2}월(?:\s*및\s*상반기)?\s*수출입\s*동향)")
+        for mt in title_pat.finditer(html):
+            title = " ".join(re.sub(r"<[^>]+>", " ", mt.group(1)).split())
             period = period_from_title(title)
             if not period:
                 continue
-            around = html[max(0, m.start()-500):m.end()+500]
-            idm = re.search(r"/nttCntnt/view/(\d+)", around)
-            if idm:
-                found.append(
-                    (period, title,
-                     f"https://okfta.kita.net/nttCntnt/view/{idm.group(1)}?mnSn=38")
-                )
+
+            around = html[max(0, mt.start()-2500): min(len(html), mt.end()+2500)]
+            for cid in _kita_candidate_ids(around):
+                url = _verify_kita_candidate(cid, period)
+                if url:
+                    found.append((period, title, url))
+                    break
 
     if not found:
         raise RuntimeError("KITA FTA 통합플랫폼에서도 월간 수출입 동향을 찾지 못했습니다.")
 
     uniq = {u: (p, t, u) for p, t, u in found}
     return max(uniq.values(), key=lambda x: x[0])
-
 
 def discover_latest():
     """산업통상부 원문 우선, 장애 시 KITA 공식 재게시 자료로 자동 전환."""
