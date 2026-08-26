@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import streamlit as st
 import pandas as pd
+import altair as alt
 import requests, xml.etree.ElementTree as ET
 from urllib.parse import unquote
 from datetime import date
@@ -68,6 +69,112 @@ def render_trade_table(df, name_col):
     rows.append('</div>')
     st.markdown("".join(rows), unsafe_allow_html=True)
 
+
+def render_horizontal_bar(df, category_col, value_col="export_usd_100m", height_per_row=31):
+    """모바일에서 안정적인 가로 막대그래프. X축은 항상 0부터 시작."""
+    d=df[[category_col,value_col]].copy()
+    d[value_col]=pd.to_numeric(d[value_col], errors="coerce").fillna(0)
+    max_v=max(float(d[value_col].max()), 1.0)
+    chart=(
+        alt.Chart(d)
+        .mark_bar(cornerRadiusEnd=4)
+        .encode(
+            y=alt.Y(
+                f"{category_col}:N",
+                sort=alt.SortField(field=value_col, order="descending"),
+                title=None,
+                axis=alt.Axis(labelLimit=120, labelFontSize=12)
+            ),
+            x=alt.X(
+                f"{value_col}:Q",
+                title="수출액(억 달러)",
+                scale=alt.Scale(domain=[0, max_v*1.08], nice=False, zero=True),
+                axis=alt.Axis(format=",.0f", tickCount=5)
+            ),
+            tooltip=[
+                alt.Tooltip(f"{category_col}:N", title="구분"),
+                alt.Tooltip(f"{value_col}:Q", title="수출액(억 달러)", format=",.1f"),
+            ],
+        )
+        .properties(height=max(250, int(len(d)*height_per_row)))
+        .configure_view(strokeWidth=0, fill="#ffffff")
+        .configure(background="#ffffff")
+        .configure_axis(labelColor="#344054", titleColor="#344054", gridColor="#e5e7eb", domainColor="#98a2b3", tickColor="#98a2b3")
+        .configure_legend(labelColor="#344054", titleColor="#344054")
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def render_time_lines(df, period_col, series_cols, height=320):
+    """시계열 그래프의 축 범위를 데이터에 맞춰 명시적으로 계산."""
+    d=df[[period_col]+series_cols].copy()
+    for c in series_cols:
+        d[c]=pd.to_numeric(d[c], errors="coerce")
+    long=d.melt(id_vars=[period_col], value_vars=series_cols, var_name="구분", value_name="값").dropna()
+    if long.empty:
+        return
+    y_min=float(long["값"].min())
+    y_max=float(long["값"].max())
+    if y_max <= y_min:
+        y_min=max(0.0, y_min*0.9)
+        y_max=y_max*1.1+1
+    else:
+        pad=(y_max-y_min)*0.12
+        y_min=max(0.0, y_min-pad)
+        y_max=y_max+pad
+    chart=(
+        alt.Chart(long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(f"{period_col}:N", title=None, axis=alt.Axis(labelAngle=-45, labelFontSize=11)),
+            y=alt.Y("값:Q", title="억 달러", scale=alt.Scale(domain=[y_min,y_max], nice=False)),
+            detail=alt.Detail("구분:N"),
+            color=alt.Color("구분:N", title=None),
+            tooltip=[
+                alt.Tooltip(f"{period_col}:N", title="기간"),
+                alt.Tooltip("구분:N", title="구분"),
+                alt.Tooltip("값:Q", title="억 달러", format=",.1f"),
+            ],
+        )
+        .properties(height=height)
+        .configure_view(strokeWidth=0, fill="#ffffff")
+        .configure(background="#ffffff")
+        .configure_axis(labelColor="#344054", titleColor="#344054", gridColor="#e5e7eb", domainColor="#98a2b3", tickColor="#98a2b3")
+        .configure_legend(labelColor="#344054", titleColor="#344054")
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def render_single_time_line(df, period_col, value_col, height=280):
+    d=df[[period_col,value_col]].copy()
+    d[value_col]=pd.to_numeric(d[value_col], errors="coerce")
+    d=d.dropna()
+    if d.empty:
+        return
+    y_min=float(d[value_col].min())
+    y_max=float(d[value_col].max())
+    if y_max <= y_min:
+        low=max(0.0,y_min*0.9); high=y_max*1.1+1
+    else:
+        pad=(y_max-y_min)*0.15
+        low=max(0.0,y_min-pad); high=y_max+pad
+    chart=(
+        alt.Chart(d)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(f"{period_col}:N", title=None, axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y(f"{value_col}:Q", title="수출액(억 달러)", scale=alt.Scale(domain=[low,high], nice=False)),
+            tooltip=[
+                alt.Tooltip(f"{period_col}:N", title="기간"),
+                alt.Tooltip(f"{value_col}:Q", title="수출액(억 달러)", format=",.1f"),
+            ],
+        )
+        .properties(height=height)
+        .configure_view(strokeWidth=0, fill="#ffffff")
+        .configure(background="#ffffff")
+        .configure_axis(labelColor="#344054", titleColor="#344054", gridColor="#e5e7eb", domainColor="#98a2b3", tickColor="#98a2b3")
+        .configure_legend(labelColor="#344054", titleColor="#344054")
+    )
+    st.altair_chart(chart, use_container_width=True)
+
 def to_num(v):
     try:return float(str(v).replace(",",""))
     except:return 0.0
@@ -114,22 +221,73 @@ def customs_item(key,hs):
 
 st.markdown("""
 <style>
-[data-testid="stAppViewContainer"]{background:#f5f7fb}
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"]{
+  background:#f4f7fb !important;
+  color:#18202a !important;
+  color-scheme: light !important;
+}
+[data-testid="stHeader"]{
+  background:rgba(244,247,251,0.96) !important;
+}
+[data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"]{
+  color:#18202a !important;
+}
+[data-testid="stSidebar"]{
+  background:#eef3f8 !important;
+  color:#18202a !important;
+}
 .block-container{max-width:1200px;padding-top:1.1rem;padding-bottom:3rem}
 .hero{background:#0f2747;color:#fff;border-radius:18px;padding:22px 24px;margin-bottom:14px}
 .hero-title{font-size:30px;font-weight:850}.hero-sub{color:#dbe7f5;font-size:14px;margin-top:4px}
-.info-card{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:17px 18px;box-shadow:0 4px 14px rgba(16,24,40,.04)}
+.info-card{background:#ffffff;border:1px solid #dfe5ee;border-radius:16px;padding:17px 18px;box-shadow:0 4px 14px rgba(16,24,40,.04)}
 .lab{color:#667085;font-size:13px;font-weight:700}.val{font-size:27px;font-weight:850;margin-top:7px}
 .note{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:12px;padding:11px 13px;font-size:13px;line-height:1.5}
 .ok{background:#ecfdf3;border:1px solid #a6f4c5;color:#027a48;border-radius:12px;padding:11px 13px;font-size:13px;line-height:1.5}
 .source{background:#f8fafc;border:1px solid #e2e8f0;color:#475467;border-radius:12px;padding:11px 13px;font-size:12px;line-height:1.5}
+[data-testid="stTabs"] button{
+  color:#344054 !important;
+}
+[data-testid="stTabs"] button[aria-selected="true"]{
+  color:#1d4ed8 !important;
+}
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+input, textarea{
+  background:#ffffff !important;
+  color:#18202a !important;
+  border-color:#d0d5dd !important;
+}
+[data-testid="stDataFrame"],
+[data-testid="stTable"]{
+  background:#ffffff !important;
+  color:#18202a !important;
+}
+[data-testid="stMetric"]{
+  background:#ffffff !important;
+  color:#18202a !important;
+}
+[data-testid="stMetricLabel"],
+[data-testid="stMetricValue"]{
+  color:#18202a !important;
+}
+[data-testid="stAlert"]{
+  color:#18202a !important;
+}
+iframe{
+  background:#ffffff !important;
+}
+.vega-embed, .vega-embed > div{
+  background:#ffffff !important;
+  color:#18202a !important;
+  border-radius:12px;
+}
 .summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0 4px}
-.summary-box{background:#f8fafc;border:1px solid #dfe5ee;border-radius:13px;padding:14px}
+.summary-box{background:#ffffff;border:1px solid #dfe5ee;border-radius:13px;padding:14px}
 .summary-box .slabel{font-size:12px;color:#667085;font-weight:700}
 .summary-box .svalue{font-size:24px;font-weight:850;margin-top:6px;color:#18202a}
 .summary-box .snote{font-size:12px;color:#475467;margin-top:4px;line-height:1.35}
-.trade-table{width:100%;border:1px solid #dfe5ee;border-radius:14px;overflow:hidden;background:#f8fafc}
-.trade-row{display:grid;grid-template-columns:minmax(120px,1.2fr) 1fr 1fr;align-items:center;border-bottom:1px solid #e5eaf1;background:#f8fafc}
+.trade-table{width:100%;border:1px solid #dfe5ee;border-radius:14px;overflow:hidden;background:#ffffff}
+.trade-row{display:grid;grid-template-columns:minmax(120px,1.2fr) 1fr 1fr;align-items:center;border-bottom:1px solid #e5eaf1;background:#ffffff}
 .trade-row:last-child{border-bottom:0}
 .trade-row.header{background:#eaf0f7;font-size:12px;font-weight:800;color:#475467}
 .trade-cell{padding:11px 13px;font-size:14px}
@@ -209,9 +367,9 @@ with tab_all:
     st.write("")
 
     if len(m)>1:
-        ch=m.set_index("period")[["export_usd_100m","import_usd_100m"]]
-        ch.columns=["수출(억 달러)","수입(억 달러)"]
-        st.line_chart(ch,height=330)
+        ch=m[["period","export_usd_100m","import_usd_100m"]].copy()
+        ch=ch.rename(columns={"export_usd_100m":"수출","import_usd_100m":"수입"})
+        render_time_lines(ch, "period", ["수출","수입"], height=330)
 
     key=get_key()
     if key:
@@ -219,9 +377,10 @@ with tab_all:
             cd=customs_total(key)
             if not cd.empty:
                 st.markdown("### 관세청 최근 12개월 통관 시계열")
-                cc=cd.set_index("기간")[["수출","수입"]]/1e8
-                cc.columns=["관세청 수출(억 달러)","관세청 수입(억 달러)"]
-                st.line_chart(cc,height=300)
+                cc=cd[["기간","수출","수입"]].copy()
+                cc["관세청 수출"]=cc["수출"]/1e8
+                cc["관세청 수입"]=cc["수입"]/1e8
+                render_time_lines(cc[["기간","관세청 수출","관세청 수입"]], "기간", ["관세청 수출","관세청 수입"], height=300)
         except Exception as e:
             st.caption(f"관세청 API 시계열 표시 실패: {e}")
 
@@ -233,7 +392,7 @@ with tab_ind:
         show=latest_i[["industry","export_usd_100m","yoy"]].copy().sort_values("export_usd_100m",ascending=False)
         render_trade_table(show, "industry")
     with right:
-        st.bar_chart(latest_i.set_index("industry")["export_usd_100m"].sort_values(ascending=False),height=480)
+        render_horizontal_bar(latest_i.sort_values("export_usd_100m", ascending=False), "industry", height_per_row=28)
 
     st.markdown("### 품목별 월별 추이")
     selected=st.selectbox("품목",latest_i["industry"].tolist())
@@ -243,7 +402,7 @@ with tab_ind:
     c1.metric("최신 수출액",f"{lr['export_usd_100m']:.1f}억 달러")
     c2.metric("전년동월비",f"{lr['yoy']:+.1f}%")
     if len(hist)>1:
-        st.line_chart(hist.set_index("period")[["export_usd_100m"]],height=280)
+        render_single_time_line(hist, "period", "export_usd_100m", height=280)
     else:
         st.caption("다음 달부터 자동으로 시계열이 누적됩니다.")
 
@@ -254,7 +413,7 @@ with tab_reg:
     with c1:
         render_trade_table(show, "region")
     with c2:
-        st.bar_chart(latest_r.set_index("region")["export_usd_100m"].sort_values(ascending=False),height=360)
+        render_horizontal_bar(latest_r.sort_values("export_usd_100m", ascending=False), "region", height_per_row=34)
 
     st.markdown("### 지역 상세")
     selected=st.selectbox("지역 선택",latest_r["region"].tolist(),key="region_select")
@@ -270,7 +429,7 @@ with tab_reg:
     )
     hist=r[r["region"]==selected].sort_values("period")
     if len(hist)>1:
-        st.line_chart(hist.set_index("period")[["export_usd_100m"]],height=280)
+        render_single_time_line(hist, "period", "export_usd_100m", height=280)
 
 with tab_mti:
     st.subheader("MTI 산업분류 탐색")
@@ -305,9 +464,10 @@ with tab_customs:
                 d=customs_item(key,hs.strip())
                 if d.empty:st.info("조회 결과 없음")
                 else:
-                    cc=d.set_index("기간")[["수출","수입"]]/1e8
-                    cc.columns=["수출(억 달러)","수입(억 달러)"]
-                    st.line_chart(cc,height=340)
+                    cc=d[["기간","수출","수입"]].copy()
+                    cc["수출"]=cc["수출"]/1e8
+                    cc["수입"]=cc["수입"]/1e8
+                    render_time_lines(cc, "기간", ["수출","수입"], height=340)
                     st.dataframe(d,use_container_width=True,hide_index=True)
             except Exception as e:
                 st.error(str(e))
