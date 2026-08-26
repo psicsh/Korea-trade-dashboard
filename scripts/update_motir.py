@@ -57,7 +57,7 @@ session.headers.update({
     "User-Agent":"Mozilla/5.0 (compatible; KoreaTradeLectureBot/1.0; educational use)"
 })
 
-BUILD_ID = "v8.9-final-20260826"
+BUILD_ID = "v8.10-final-20260826"
 
 def normalize_download_url(raw_href, base_url):
     """
@@ -307,19 +307,29 @@ def extract_pdf_text(soup, detail_url):
 
 
 def get_detail(url):
+    """
+    상세 HTML 본문과 첨부 PDF의 텍스트를 하나의 문자열로 반환한다.
+    반환값은 문자열 1개다.
+    """
     r = session.get(url, timeout=(10, 30))
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     page_text = soup.get_text("\n", strip=True)
 
     pdf_texts = []
+    pdf_ok = 0
+
     for a in soup.find_all("a"):
         href_raw = a.get("href") or ""
         label = " ".join(a.get_text(" ", strip=True).split())
         probe = f"{href_raw} {label}".lower()
 
-        # PDF 첨부 또는 /attach/down/ 형태의 다운로드 링크만 시도
-        if ".pdf" not in probe and "/attach/down/" not in probe:
+        # 산업부 /attach/down, KITA downAtch, 또는 파일명이 PDF인 링크
+        if (
+            ".pdf" not in probe
+            and "/attach/down/" not in probe
+            and "downatch" not in probe
+        ):
             continue
 
         href = normalize_download_url(href_raw, r.url)
@@ -330,27 +340,30 @@ def get_detail(url):
         try:
             rr = session.get(href, timeout=(10, 35))
             rr.raise_for_status()
-            ctype = (rr.headers.get("content-type") or "").lower()
+            content = rr.content
 
-            # 확장자가 없어도 실제 PDF 응답이면 처리
-            if "pdf" in ctype or rr.content[:4] == b"%PDF":
-                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-                    tf.write(rr.content)
-                    tmp = tf.name
-                try:
-                    reader = PdfReader(tmp)
-                    txt = "\n".join((p.extract_text() or "") for p in reader.pages)
-                    if txt.strip():
-                        pdf_texts.append(txt)
-                finally:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
+            # MIME이 application/x-msdownload여도 실제 PDF magic으로 판별
+            if content[:4] != b"%PDF":
+                print(
+                    f"[WARN] 첨부파일이 PDF가 아님: {href} / "
+                    f"content-type={rr.headers.get('content-type')}",
+                    file=sys.stderr
+                )
+                continue
+
+            reader = PdfReader(BytesIO(content))
+            txt = "\n".join((p.extract_text() or "") for p in reader.pages)
+            if txt.strip():
+                pdf_texts.append(txt)
+                pdf_ok += 1
         except Exception as e:
             print(f"[WARN] PDF 추출 실패: {href_raw} / {e}", file=sys.stderr)
 
-    # HTML 본문 + PDF 추출문을 함께 파싱 대상으로 사용
+    if pdf_ok:
+        print(f"[INFO] PDF 텍스트 추출 성공: {pdf_ok}개")
+    else:
+        print("[WARN] 사용 가능한 PDF를 추출하지 못함. HTML 본문으로 우선 시도.", file=sys.stderr)
+
     combined = page_text
     if pdf_texts:
         combined += "\n\n" + "\n\n".join(pdf_texts)
@@ -434,6 +447,31 @@ def parse_overall(text):
         "daily_export_usd_100m":num(daily.group(1)) if daily else None,
     }
 
+def extract_trade_metrics(text, verbose=True):
+    """
+    한 번의 텍스트에서 총괄·20대 품목·9대 지역을 추출한다.
+    """
+    overall = parse_overall(text)
+
+    inds = {}
+    for n in INDUSTRIES:
+        m = find_metric(text, n)
+        if m:
+            inds[n] = m
+        elif verbose:
+            print(f"[MISS] industry: {n}", file=sys.stderr)
+
+    regs = {}
+    for n in REGIONS:
+        m = find_region(text, n)
+        if m:
+            regs[n] = m
+        elif verbose:
+            print(f"[MISS] region: {n}", file=sys.stderr)
+
+    return overall, inds, regs
+
+
 def validate(period, overall, industries, regions):
     errors=[]
     if len(industries)!=20:
@@ -486,20 +524,58 @@ def main():
         print("[INFO] 이미 반영된 월. --force가 아니므로 종료")
         return
 
-    text,_=get_detail(url)
-    overall=parse_overall(text)
-    inds={}
-    for n in INDUSTRIES:
-        m=find_metric(text,n)
-        if m: inds[n]=m
-        else: print(f"[MISS] industry: {n}",file=sys.stderr)
-    regs={}
-    for n in REGIONS:
-        m=find_region(text,n)
-        if m: regs[n]=m
-        else: print(f"[MISS] region: {n}",file=sys.stderr)
+    # 1차: 발견된 원문(대개 산업통상부)에서 추출
+    text = get_detail(url)
 
-    validate(period,overall,inds,regs)
+    first_error = None
+    try:
+        overall, inds, regs = extract_trade_metrics(text, verbose=False)
+    except Exception as e:
+        first_error = e
+        overall, inds, regs = None, {}, {}
+
+    # 산업부 첨부 PDF가 404 등으로 실패하거나 20/20·9/9가 안 나오면
+    # 동일 월의 KITA 재게시 페이지 + 첨부 PDF를 자동으로 합쳐 재시도.
+    need_fallback = (
+        overall is None
+        or len(inds) != 20
+        or len(regs) != 9
+    )
+
+    if need_fallback:
+        print(
+            f"[WARN] 1차 추출 불완전: "
+            f"overall={'OK' if overall else 'FAIL'}, "
+            f"industries={len(inds)}/20, regions={len(regs)}/9"
+            + (f" / {first_error}" if first_error else ""),
+            file=sys.stderr
+        )
+
+        try:
+            k_period, k_title, k_url = discover_latest_kita()
+
+            if k_period == period and k_url != url:
+                print(f"[INFO] 동일 월 KITA 재게시 자료로 보완: {k_url}")
+                kita_text = get_detail(k_url)
+
+                # 산업부 HTML + KITA 본문/PDF를 합쳐 다시 파싱
+                merged_text = text + "\n\n" + kita_text
+                overall, inds, regs = extract_trade_metrics(merged_text, verbose=True)
+            else:
+                print(
+                    f"[WARN] KITA 최신 월({k_period})이 원문 월({period})과 달라 "
+                    "자동 병합하지 않음.",
+                    file=sys.stderr
+                )
+                if overall is None:
+                    raise first_error or RuntimeError("총괄 추출 실패")
+        except Exception as e:
+            print(f"[WARN] KITA 보완 실패: {type(e).__name__}: {e}", file=sys.stderr)
+            if overall is None:
+                raise first_error or e
+            # 총괄은 뽑혔어도 품목/지역 부족은 아래 validate에서 안전하게 중단
+
+    validate(period, overall, inds, regs)
 
     monthrow={
         "period":period,
