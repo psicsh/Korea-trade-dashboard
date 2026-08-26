@@ -51,7 +51,8 @@ HS_COMMON_NAMES = {
 }
 
 def _digits(v):
-    return re.sub(r"\D", "", str(v or "").split(".0")[0])
+    # 정규식 모듈에 의존하지 않고 숫자만 추출
+    return "".join(ch for ch in str(v or "").split(".0")[0] if ch.isdigit())
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_hsk_codebook(path_str, file_mtime):
