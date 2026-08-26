@@ -46,7 +46,7 @@ def recent_window():
 @st.cache_data(ttl=3600,show_spinner=False)
 def customs_item(key,hs):
     s,e=recent_window()
-    rr=requests.get(ITEM_URL,params={"serviceKey":key,"strtYymm":s,"endYymm":e,"hsSgn":hs},timeout=45)
+    rr=requests.get(ITEM_URL,params={"serviceKey":key,"strtYymm":s,"endYymm":e,"hsSgn":hs},timeout=(5,12))
     rr.raise_for_status()
     root=ET.fromstring(rr.content)
     code=root.findtext(".//resultCode"); msg=root.findtext(".//resultMsg") or ""
@@ -105,44 +105,115 @@ html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{background:#f
 
 st.markdown('<div class="hero"><div class="hero-title">🇰🇷 한국무역 한눈에 보기</div><div class="hero-sub">관세청 확정 통계 · 2026 MTI 20대 품목 · 9대 주요 수출지역</div></div>',unsafe_allow_html=True)
 
-MENU=["🇰🇷 전체 무역","🏭 20대 품목","🌏 9대 지역","🧩 MTI 분류","🔎 관세청 상세조회","🎓 강의실"]
+MENU=["🇰🇷 전체 무역","🏭 20대 품목","🌏 9대 지역","🧩 MTI 분류","🔎 관세청 상세조회"]
 page=st.segmented_control("메뉴",MENU,default=MENU[0],selection_mode="single",label_visibility="collapsed") or MENU[0]
 
 m,i,r,status=load_snapshots()
 latest=str(m["period"].max())
 source_ok=status.get("source")=="customs" and not status.get("errors")
 
+def latest_slice(df, name_col):
+    p=str(df["period"].max())
+    return p, df[df["period"].astype(str)==p].copy()
+
+ind_period, li = latest_slice(i, "industry")
+reg_period, lr = latest_slice(r, "region")
+
 if page=="🇰🇷 전체 무역":
     st.subheader(f"대한민국 무역 Dashboard · {latest}")
     latestrow=m[m["period"].astype(str)==latest].iloc[-1]
+
     c1,c2,c3=st.columns(3)
     vals=[
         ("수출",f"{latestrow['export_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latestrow.get('export_yoy',0):+.1f}%"),
         ("수입",f"{latestrow['import_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latestrow.get('import_yoy',0):+.1f}%"),
-        ("무역수지",f"{latestrow['balance_usd_100m']:+,.1f}억 달러","확정·현행화 통계" if source_ok else "최근 저장자료"),
+        ("무역수지",f"{latestrow['balance_usd_100m']:+,.1f}억 달러","관세청 자동갱신" if source_ok else "최근 저장자료"),
     ]
     for col,(a,b,c) in zip([c1,c2,c3],vals):
-        with col:st.markdown(f'<div class="info-card"><div class="lab">{a}</div><div class="val">{b}</div><div class="lab">{c}</div></div>',unsafe_allow_html=True)
+        with col:
+            st.markdown(
+                f'<div class="info-card"><div class="lab">{a}</div>'
+                f'<div class="val">{b}</div><div class="lab">{c}</div></div>',
+                unsafe_allow_html=True
+            )
+
+    # 이번 달 주요 특징: 저장된 20대 품목/9대 지역만 사용하므로 즉시 표시
+    if not li.empty and not lr.empty:
+        inc_count=int((li["yoy"]>0).sum())
+        top_export=li.sort_values("export_usd_100m",ascending=False).iloc[0]
+        top_growth=li.sort_values("yoy",ascending=False).iloc[0]
+        down=lr.sort_values("yoy").iloc[0]
+
+        st.markdown("### 이번 달 주요 특징")
+        st.markdown(
+            f'<div class="summary-grid">'
+            f'<div class="summary-box"><div class="slabel">20대 품목 증가</div>'
+            f'<div class="svalue">{inc_count}개 / 20개</div><div class="snote">전년동월 대비</div></div>'
+            f'<div class="summary-box"><div class="slabel">최대 수출 품목</div>'
+            f'<div class="svalue">{top_export["industry"]}</div><div class="snote">수출액 {top_export["export_usd_100m"]:.1f}억 달러</div></div>'
+            f'<div class="summary-box"><div class="slabel">증가율 1위</div>'
+            f'<div class="svalue">{top_growth["industry"]}</div><div class="snote">전년동월 대비 {top_growth["yoy"]:+.1f}%</div></div>'
+            f'<div class="summary-box"><div class="slabel">지역 증감률 최저</div>'
+            f'<div class="svalue">{down["region"]}</div><div class="snote">전년동월 대비 {down["yoy"]:+.1f}%</div></div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("### 품목·지역 한눈에 보기")
+        a,b=st.columns(2)
+        with a:
+            st.caption("20대 품목 수출 상위 10개")
+            render_horizontal_bar(
+                li.sort_values("export_usd_100m",ascending=False).head(10),
+                "industry"
+            )
+        with b:
+            st.caption("9대 주요 수출지역")
+            render_horizontal_bar(
+                lr.sort_values("export_usd_100m",ascending=False),
+                "region"
+            )
+
     if len(m)>1:
         st.markdown("### 최근 12개월 통관 시계열")
         render_lines(m.sort_values("period").tail(12))
 
 elif page=="🏭 20대 품목":
-    st.subheader(f"2026 MTI 기준 20대 주력 수출품목 · {str(i['period'].max())}")
-    li=i[i["period"].astype(str)==str(i["period"].max())].copy()
+    st.subheader(f"2026 MTI 기준 20대 주력 수출품목 · {ind_period}")
+
     left,right=st.columns([1.25,1])
-    with left:render_trade_table(li.sort_values("export_usd_100m",ascending=False),"industry")
-    with right:render_horizontal_bar(li.sort_values("export_usd_100m",ascending=False),"industry")
+    with left:
+        render_trade_table(li.sort_values("export_usd_100m",ascending=False),"industry")
+    with right:
+        render_horizontal_bar(li.sort_values("export_usd_100m",ascending=False),"industry")
+
+    selected=st.selectbox(
+        "품목 선택",
+        INDUSTRY_ORDER,
+        index=0,
+        help="품목명을 입력하거나 목록에서 선택할 수 있습니다."
+    )
+    rr=li[li["industry"]==selected]
+    if not rr.empty:
+        rr=rr.iloc[0]
+        a,b=st.columns(2)
+        a.metric(f"{selected} 수출액",f"{rr['export_usd_100m']:.1f}억 달러")
+        b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
 
 elif page=="🌏 9대 지역":
-    st.subheader(f"9대 주요 수출지역 · {str(r['period'].max())}")
-    lr=r[r["period"].astype(str)==str(r["period"].max())].copy()
+    st.subheader(f"9대 주요 수출지역 · {reg_period}")
     c1,c2=st.columns([1,1])
-    with c1:render_trade_table(lr,"region")
-    with c2:render_horizontal_bar(lr.sort_values("export_usd_100m",ascending=False),"region")
+    with c1:
+        render_trade_table(lr,"region")
+    with c2:
+        render_horizontal_bar(lr.sort_values("export_usd_100m",ascending=False),"region")
     sel=st.selectbox("지역 선택",REGION_ORDER)
-    rr=lr[lr["region"]==sel].iloc[0]
-    a,b=st.columns(2);a.metric(f"대{sel} 수출",f"{rr['export_usd_100m']:.1f}억 달러");b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
+    rr=lr[lr["region"]==sel]
+    if not rr.empty:
+        rr=rr.iloc[0]
+        a,b=st.columns(2)
+        a.metric(f"대{sel} 수출",f"{rr['export_usd_100m']:.1f}억 달러")
+        b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
 
 elif page=="🧩 MTI 분류":
     st.subheader("2026 HSK-MTI 연계표")
@@ -150,28 +221,44 @@ elif page=="🧩 MTI 분류":
     if p.exists():
         try:
             mp=pd.read_excel(p,sheet_name="HSK-MTI 연계표",dtype=str)
-            counts=(mp[mp["구분"].isin(INDUSTRY_ORDER)].groupby("구분")["HSK"].nunique().reindex(INDUSTRY_ORDER).fillna(0).astype(int).rename("연결 HSK 수").reset_index())
+            counts=(mp[mp["구분"].isin(INDUSTRY_ORDER)]
+                    .groupby("구분")["HSK"].nunique()
+                    .reindex(INDUSTRY_ORDER).fillna(0).astype(int)
+                    .rename("연결 HSK 수").reset_index()
+                    .rename(columns={"구분":"품목"}))
             st.dataframe(counts,use_container_width=True,hide_index=True)
-        except Exception as e:st.error(str(e))
+        except Exception as e:
+            st.error(str(e))
 
 elif page=="🔎 관세청 상세조회":
     st.subheader("관세청 HS 상세조회")
     key=get_key()
     hs=st.text_input("HS 코드",value="8542")
     if st.button("조회",type="primary"):
-        if not key:st.warning("Streamlit Secrets에 인증키가 필요합니다.")
+        if not key:
+            st.warning("Streamlit Secrets에 인증키가 필요합니다.")
         else:
             try:
                 with st.spinner("선택한 HS 코드만 조회 중…"):
                     d=customs_item(key,hs.strip())
-                if d.empty:st.info("조회 결과 없음")
+                if d.empty:
+                    st.info("조회 결과 없음")
                 else:
-                    show=d.copy();show["export_usd_100m"]=show["export"]/1e8;show["import_usd_100m"]=show["import"]/1e8
+                    show=d.copy()
+                    show["export_usd_100m"]=show["export"]/1e8
+                    show["import_usd_100m"]=show["import"]/1e8
                     render_lines(show[["period","export_usd_100m","import_usd_100m"]])
-            except Exception as e:st.error(str(e))
-else:
-    st.subheader("강의실")
-    st.markdown("월별 기본 화면은 저장된 최신 관세청 확정자료를 즉시 표시합니다. HS 상세조회만 선택한 코드에 대해 실시간 API를 사용합니다.")
-
+            except requests.exceptions.ConnectTimeout:
+                st.warning("현재 관세청 API에 연결되지 않습니다. 5초 후 조회를 중단했습니다. 잠시 뒤 다시 시도해 주세요.")
+            except requests.exceptions.ReadTimeout:
+                st.warning("관세청 API 응답이 지연되고 있습니다. 오래 기다리지 않도록 조회를 중단했습니다.")
+            except requests.exceptions.ConnectionError:
+                st.warning("현재 관세청 API 연결이 원활하지 않습니다. 잠시 뒤 다시 시도해 주세요.")
+            except Exception as e:
+                st.error(str(e))
 caption="관세청 확정 통계 자동저장" if source_ok else "최근 저장자료"
-st.markdown(f'<div class="source"><b>자료:</b> {caption} · 한국무역협회 2026 HSK-MTI 연계표 · 학생 화면은 API 대기 없이 즉시 표시됩니다.</div>',unsafe_allow_html=True)
+st.markdown(
+    f'<div class="source"><b>자료:</b> {caption} · 한국무역협회 2026 HSK-MTI 연계표 · '
+    f'학생 화면은 API 대기 없이 즉시 표시됩니다.</div>',
+    unsafe_allow_html=True
+)
