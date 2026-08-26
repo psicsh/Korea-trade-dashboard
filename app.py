@@ -34,6 +34,114 @@ def get_key():
     try:return unquote(str(st.secrets["DATA_GO_KR_SERVICE_KEY"]).strip())
     except:return None
 
+
+# 공식 HSK 코드표가 상위 4단위 명칭을 제공하지 않을 때 쓰는 보조 명칭.
+HS_COMMON_NAMES = {
+    "8542": "전자집적회로",
+    "8703": "승용자동차 및 기타 차량",
+    "8471": "자동자료처리기계(컴퓨터)",
+    "8517": "전화기 및 기타 통신기기",
+    "8901": "여객선·화물선 등 선박",
+    "2710": "석유와 역청유의 조제품",
+    "3004": "의약품",
+    "8507": "축전지",
+    "3304": "화장품·미용 또는 메이크업용 제품",
+    "8708": "자동차 부분품과 부속품",
+    "9018": "의료용·수의용 기기",
+}
+
+def _digits(v):
+    return re.sub(r"\D", "", str(v or "").split(".0")[0])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_hsk_codebook(path_str, file_mtime):
+    """공식 엑셀의 HSK코드표에서 코드와 한글 명칭을 읽는다."""
+    p = Path(path_str)
+    raw = pd.read_excel(p, sheet_name="HSK코드표", dtype=str)
+    if raw.empty:
+        return pd.DataFrame(columns=["code","name"])
+
+    cols = [str(c).strip() for c in raw.columns]
+
+    code_col = None
+    for c in cols:
+        u = c.upper().replace(" ", "")
+        if u in ("HSK","HSK코드","HS코드","HS"):
+            code_col = c
+            break
+    if code_col is None:
+        for c in cols:
+            if "HSK" in c.upper() and "명" not in c:
+                code_col = c
+                break
+
+    name_col = None
+    for key_word in ["품명","HSK명","품목명","한글품명","한글명","명칭","품목"]:
+        for c in cols:
+            if (c == key_word or key_word in c) and c != code_col:
+                name_col = c
+                break
+        if name_col:
+            break
+
+    if code_col is None or name_col is None:
+        return pd.DataFrame(columns=["code","name"])
+
+    d = raw[[code_col,name_col]].copy()
+    d.columns = ["code","name"]
+    d["code"] = d["code"].map(_digits)
+    d["name"] = d["name"].astype(str).str.strip()
+    d = d[d["code"].str.fullmatch(r"\d{2,10}", na=False)]
+    d = d[~d["name"].isin(["","nan","None"])]
+    return d.drop_duplicates(["code","name"])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_hsk_mti_lookup(path_str, file_mtime):
+    """HS prefix가 어느 20대 MTI 품목에 연결되는지 보여주기 위한 보조표."""
+    p = Path(path_str)
+    d = pd.read_excel(p, sheet_name="HSK-MTI 연계표", dtype=str)
+    if not {"HSK","구분"}.issubset(d.columns):
+        return pd.DataFrame(columns=["hsk","industry"])
+    d = d[["HSK","구분"]].copy()
+    d["hsk"] = d["HSK"].map(_digits)
+    d["industry"] = d["구분"].astype(str).str.strip()
+    d = d[d["hsk"].str.fullmatch(r"\d{10}", na=False)]
+    d = d[d["industry"].isin(INDUSTRY_ORDER)]
+    return d[["hsk","industry"]].drop_duplicates()
+
+def lookup_hs_info(hs):
+    """API 호출 없이 로컬 공식 코드표에서 HS 명칭과 관련 MTI를 즉시 찾는다."""
+    code = _digits(hs)
+    if not code:
+        return None, []
+
+    name = None
+    groups = []
+    p = DATA / "mti_hsk_mapping.xlsx"
+
+    if p.exists():
+        try:
+            cb = load_hsk_codebook(str(p), p.stat().st_mtime_ns)
+            exact = cb[cb["code"] == code]
+            if not exact.empty:
+                name = str(exact.iloc[0]["name"])
+            else:
+                matched = cb[cb["code"].str.startswith(code, na=False)]
+                unique_names = matched["name"].dropna().drop_duplicates().tolist()
+                if len(unique_names) == 1:
+                    name = unique_names[0]
+
+            mp = load_hsk_mti_lookup(str(p), p.stat().st_mtime_ns)
+            matched_mp = mp[mp["hsk"].str.startswith(code, na=False)]
+            groups = matched_mp["industry"].drop_duplicates().tolist()
+        except Exception:
+            pass
+
+    if not name:
+        name = HS_COMMON_NAMES.get(code)
+
+    return name, groups
+
 def to_num(v):
     try:return float(str(v).replace(",",""))
     except:return 0.0
@@ -99,8 +207,20 @@ html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{background:#f
 .hero{background:#0f2747;color:#fff;border-radius:18px;padding:22px 24px;margin-bottom:12px}.hero-title{font-size:30px;font-weight:850}.hero-sub{color:#dbe7f5;font-size:14px;margin-top:4px}
 .info-card{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:16px}.lab{font-size:12px;color:#667085;font-weight:700}.val{font-size:23px;font-weight:850;margin:7px 0}
 .trade-table{width:100%;border:1px solid #dfe5ee;border-radius:14px;overflow:hidden;background:#fff}.trade-row{display:grid;grid-template-columns:minmax(120px,1.2fr) 1fr 1fr;align-items:center;border-bottom:1px solid #e5eaf1;background:#fff}.trade-row:last-child{border-bottom:0}.trade-row.header{background:#eaf0f7;font-size:12px;font-weight:800;color:#475467}.trade-cell{padding:11px 13px;font-size:14px}.trade-cell.name{font-weight:800}.trade-cell.num{text-align:right}.positive{color:#067647;font-weight:800}.negative{color:#b42318;font-weight:800}
+.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:10px 0 20px}
+.summary-box{background:#fff;border:1px solid #dfe5ee;border-radius:14px;padding:15px 15px 14px 17px;box-shadow:0 3px 10px rgba(16,24,40,.06);min-height:112px}
+.summary-box:nth-child(1){border-left:4px solid #2563EB}
+.summary-box:nth-child(2){border-left:4px solid #7C3AED}
+.summary-box:nth-child(3){border-left:4px solid #059669}
+.summary-box:nth-child(4){border-left:4px solid #D97706}
+.slabel{font-size:12px;color:#667085;font-weight:750;letter-spacing:.01em}
+.svalue{font-size:24px;font-weight:850;margin-top:8px;color:#18202a}
+.snote{font-size:12px;color:#475467;margin-top:6px;line-height:1.35}
+.hs-name-card{background:#fff;border:1px solid #d7e0ea;border-left:4px solid #2563EB;border-radius:12px;padding:13px 15px;margin:8px 0 14px;box-shadow:0 2px 8px rgba(16,24,40,.05)}
+.hs-code-title{font-size:18px;font-weight:850;color:#18202a}
+.hs-sub{font-size:12px;color:#667085;margin-top:5px}
 .source{background:#f8fafc;border:1px solid #e2e8f0;color:#475467;border-radius:12px;padding:11px 13px;font-size:12px}
-@media(max-width:760px){.trade-row{grid-template-columns:minmax(100px,1.2fr) .9fr .9fr}.trade-cell{padding:10px 8px;font-size:12px}}
+@media(max-width:760px){.summary-grid{grid-template-columns:1fr 1fr;gap:10px}.summary-box{min-height:105px;padding:13px}.svalue{font-size:20px}.trade-row{grid-template-columns:minmax(100px,1.2fr) .9fr .9fr}.trade-cell{padding:10px 8px;font-size:12px}}
 </style>""",unsafe_allow_html=True)
 
 st.markdown('<div class="hero"><div class="hero-title">🇰🇷 한국무역 한눈에 보기</div><div class="hero-sub">관세청 확정 통계 · 2026 MTI 20대 품목 · 9대 주요 수출지역</div></div>',unsafe_allow_html=True)
@@ -232,21 +352,49 @@ elif page=="🧩 MTI 분류":
 
 elif page=="🔎 관세청 상세조회":
     st.subheader("관세청 HS 상세조회")
+    st.caption("HS 2·4·6·10단위 코드를 입력할 수 있습니다. 품목명은 저장된 공식 HSK 코드표에서 먼저 확인합니다.")
     key=get_key()
-    hs=st.text_input("HS 코드",value="8542")
+    hs=st.text_input("HS 코드",value="8542",help="예: 8542 전자집적회로, 8703 승용자동차")
+
+    hs_code=_digits(hs)
+    hs_name,hs_groups=lookup_hs_info(hs_code)
+
+    if hs_code:
+        title=f"HS {hs_code}"
+        if hs_name:
+            title += f" · {hs_name}"
+
+        group_note=""
+        if hs_groups:
+            shown=" · ".join(hs_groups[:3])
+            if len(hs_groups)>3:
+                shown += " 외"
+            group_note=f'<div class="hs-sub">관련 MTI: {shown}</div>'
+
+        st.markdown(
+            f'<div class="hs-name-card"><div class="hs-code-title">{title}</div>{group_note}</div>',
+            unsafe_allow_html=True
+        )
+
     if st.button("조회",type="primary"):
         if not key:
             st.warning("Streamlit Secrets에 인증키가 필요합니다.")
+        elif not hs_code:
+            st.warning("HS 코드를 입력해 주세요.")
         else:
             try:
                 with st.spinner("선택한 HS 코드만 조회 중…"):
-                    d=customs_item(key,hs.strip())
+                    d=customs_item(key,hs_code)
                 if d.empty:
                     st.info("조회 결과 없음")
                 else:
                     show=d.copy()
                     show["export_usd_100m"]=show["export"]/1e8
                     show["import_usd_100m"]=show["import"]/1e8
+                    result_title=f"HS {hs_code}"
+                    if hs_name:
+                        result_title += f" · {hs_name}"
+                    st.markdown(f"### {result_title} 최근 12개월")
                     render_lines(show[["period","export_usd_100m","import_usd_100m"]])
             except requests.exceptions.ConnectTimeout:
                 st.warning("현재 관세청 API에 연결되지 않습니다. 5초 후 조회를 중단했습니다. 잠시 뒤 다시 시도해 주세요.")
@@ -256,6 +404,7 @@ elif page=="🔎 관세청 상세조회":
                 st.warning("현재 관세청 API 연결이 원활하지 않습니다. 잠시 뒤 다시 시도해 주세요.")
             except Exception as e:
                 st.error(str(e))
+
 caption="관세청 확정 통계 자동저장" if source_ok else "최근 저장자료"
 st.markdown(
     f'<div class="source"><b>자료:</b> {caption} · 한국무역협회 2026 HSK-MTI 연계표 · '
