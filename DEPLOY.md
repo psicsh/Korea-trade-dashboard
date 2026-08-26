@@ -1,14 +1,7 @@
-# v9.0 배포 순서
+# v9.2 배포
 
-1. 기존 GitHub 저장소의 파일을 v9.0 파일로 교체
-2. `.github/workflows/update_trade.yml`은 삭제하거나 비활성화
-3. 공식 `2026 MTI-HSK 코드표_vFF_260507.xlsx`를 다운로드
-4. 파일명을 `mti_hsk_mapping.xlsx`로 바꿔 `data/` 폴더에 업로드
-5. 기존 Streamlit Secrets의 DATA_GO_KR_SERVICE_KEY는 그대로 유지
-6. Streamlit이 자동 재배포되면 확인
-
-체크:
-- 전체 무역 숫자 표시
-- 20대 품목 탭에서 'HSK-MTI ...개 코드 인식' 성공 메시지
-- 9대 지역 표
-- HS 8542 상세조회
+1. app.py / requirements.txt / scripts / .github / data의 v9.2 파일을 GitHub에 업로드
+2. 기존 data/mti_hsk_mapping.xlsx는 유지
+3. GitHub repository secret DATA_GO_KR_SERVICE_KEY 추가
+4. Actions → Update Customs trade data → Run workflow 1회 테스트
+5. 이후 매월 15~22일 자동 실행

@@ -1,0 +1,10 @@
+{
+  "source": "seed",
+  "period": "2026-07",
+  "updated_at": null,
+  "components": {
+    "monthly": "seed",
+    "industry": "seed",
+    "region": "seed"
+  }
+}

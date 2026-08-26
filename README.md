@@ -1,21 +1,25 @@
-# 한국무역 한눈에 보기 v9.1
+# 한국무역 한눈에 보기 v9.2
 
-## v9.0 → v9.1 핵심 수정
+## 핵심
+학생 화면에서 관세청 API를 직접 기다리지 않습니다.
 
-v9.0은 앱 시작 시 전체무역·국가별·HSK 전체 데이터를 모두 먼저 불러와
-화면이 오래 비어 보이는 문제가 있었습니다.
+- 전체무역: `data/trade_monthly.csv` 즉시 로드
+- 20대 품목: `data/trade_industry.csv` 즉시 로드
+- 9대 지역: `data/trade_region.csv` 즉시 로드
+- GitHub Actions: 매월 15~22일 관세청 API를 백그라운드에서 호출해 위 CSV 자동 갱신
+- HS 상세조회만 사용자가 버튼을 눌렀을 때 실시간 API 호출
+- API 한 구성요소가 실패해도 기존 정상 CSV를 그대로 유지
 
-v9.1은:
-- 메뉴를 선택형으로 바꿔 **선택한 화면의 API만 호출**
-- 첫 화면은 전체무역 API만 읽어 빠르게 표시
-- 20대 품목 탭을 열 때만 월별 HSK 전체 데이터를 읽음
-- 공식 엑셀의 `HSK-MTI 연계표` 시트와 `HSK / MTI / 구분` 열을 직접 사용
-- `구분` 열의 20대 품목명을 직접 사용하므로 MTI prefix 추정 로직 제거
-- 엑셀 파일 수정시 mtime을 캐시 키로 사용해 자동 재인식
-- 첫 20대 품목 조회 후 12시간 캐시
+## 한 번만 필요한 설정
+GitHub 저장소에도 공공데이터포털 인증키를 Secret으로 등록해야 합니다.
 
-## 월별 수동작업
-없음.
+Settings → Secrets and variables → Actions → New repository secret
 
-## 연계표
-`data/mti_hsk_mapping.xlsx`
+Name:
+`DATA_GO_KR_SERVICE_KEY`
+
+Value:
+Streamlit Secrets에 넣었던 것과 같은 공공데이터포털 인증키
+
+그 뒤 Actions → `Update Customs trade data` → Run workflow로 첫 실행을 한 번 확인합니다.
+정상 확인 후에는 매월 자동 실행됩니다.
