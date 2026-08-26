@@ -105,13 +105,19 @@ def render_horizontal_bar(df, category_col, value_col="export_usd_100m", height_
     st.altair_chart(chart, use_container_width=True)
 
 def render_time_lines(df, period_col, series_cols, height=320):
-    """시계열 그래프의 축 범위를 데이터에 맞춰 명시적으로 계산."""
+    """시계열: 수출은 파란 실선, 수입은 주황 점선으로 명확히 구분."""
     d=df[[period_col]+series_cols].copy()
     for c in series_cols:
         d[c]=pd.to_numeric(d[c], errors="coerce")
-    long=d.melt(id_vars=[period_col], value_vars=series_cols, var_name="구분", value_name="값").dropna()
+    long=d.melt(
+        id_vars=[period_col],
+        value_vars=series_cols,
+        var_name="구분",
+        value_name="값"
+    ).dropna()
     if long.empty:
         return
+
     y_min=float(long["값"].min())
     y_max=float(long["값"].max())
     if y_max <= y_min:
@@ -121,24 +127,62 @@ def render_time_lines(df, period_col, series_cols, height=320):
         pad=(y_max-y_min)*0.12
         y_min=max(0.0, y_min-pad)
         y_max=y_max+pad
+
+    # 첫 번째 시리즈는 수출, 두 번째 시리즈는 수입이라는 현재 앱 호출 규칙을 사용.
+    palette=["#2563EB", "#F59E0B", "#059669", "#7C3AED"]
+    color_range=palette[:len(series_cols)]
+    dash_range=[[1,0], [7,4], [2,3], [10,3,2,3]][:len(series_cols)]
+
+    base=alt.Chart(long).encode(
+        x=alt.X(
+            f"{period_col}:N",
+            title=None,
+            axis=alt.Axis(labelAngle=-45, labelFontSize=11)
+        ),
+        y=alt.Y(
+            "값:Q",
+            title="억 달러",
+            scale=alt.Scale(domain=[y_min,y_max], nice=False)
+        ),
+        color=alt.Color(
+            "구분:N",
+            title=None,
+            scale=alt.Scale(domain=series_cols, range=color_range),
+            legend=alt.Legend(
+                orient="bottom",
+                direction="horizontal",
+                labelFontSize=12,
+                symbolStrokeWidth=4
+            )
+        ),
+        strokeDash=alt.StrokeDash(
+            "구분:N",
+            title=None,
+            scale=alt.Scale(domain=series_cols, range=dash_range),
+            legend=None
+        ),
+        tooltip=[
+            alt.Tooltip(f"{period_col}:N", title="기간"),
+            alt.Tooltip("구분:N", title="구분"),
+            alt.Tooltip("값:Q", title="억 달러", format=",.1f"),
+        ],
+    )
+
+    line=base.mark_line(strokeWidth=3)
+    points=base.mark_point(filled=True, size=58)
+
     chart=(
-        alt.Chart(long)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(f"{period_col}:N", title=None, axis=alt.Axis(labelAngle=-45, labelFontSize=11)),
-            y=alt.Y("값:Q", title="억 달러", scale=alt.Scale(domain=[y_min,y_max], nice=False)),
-            detail=alt.Detail("구분:N"),
-            color=alt.Color("구분:N", title=None),
-            tooltip=[
-                alt.Tooltip(f"{period_col}:N", title="기간"),
-                alt.Tooltip("구분:N", title="구분"),
-                alt.Tooltip("값:Q", title="억 달러", format=",.1f"),
-            ],
-        )
+        (line + points)
         .properties(height=height)
         .configure_view(strokeWidth=0, fill="#ffffff")
         .configure(background="#ffffff")
-        .configure_axis(labelColor="#344054", titleColor="#344054", gridColor="#e5e7eb", domainColor="#98a2b3", tickColor="#98a2b3")
+        .configure_axis(
+            labelColor="#344054",
+            titleColor="#344054",
+            gridColor="#e5e7eb",
+            domainColor="#98a2b3",
+            tickColor="#98a2b3"
+        )
         .configure_legend(labelColor="#344054", titleColor="#344054")
     )
     st.altair_chart(chart, use_container_width=True)
