@@ -1,2 +1,1 @@
-﻿period,export_usd_100m,export_yoy,import_usd_100m,import_yoy,balance_usd_100m,daily_export_usd_100m,source_title,source_url,status
-2026-07,988.9,62.8,685.6,26.5,303.2,41.2,2026년 7월 수출입 동향,https://okfta.kita.net/nttCntnt/view/10184?mnSn=38,잠정치
+period,export_usd,import_usd,balance_usd,export_count,import_count,source

@@ -1,6 +1,4 @@
 {
-  "period": "2026-07",
-  "last_success": "seed",
-  "source_url": "https://okfta.kita.net/nttCntnt/view/10184?mnSn=38",
-  "message": "v8 초기 데이터. 이후 GitHub Actions가 산업통상부 월간 수출입동향을 매일 확인합니다."
+  "status": "not_initialized",
+  "message": "GitHub Actions에서 최초 과거자료 구축을 실행해 주세요."
 }

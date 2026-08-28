@@ -1,430 +1,359 @@
-from pathlib import Path
-from urllib.parse import unquote
-from datetime import date
-import json, xml.etree.ElementTree as ET
+from __future__ import annotations
+
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
-import requests
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
-st.set_page_config(page_title="한국무역 한눈에 보기",page_icon="🇰🇷",layout="wide",initial_sidebar_state="collapsed")
-
-ROOT=Path(__file__).resolve().parent
-DATA=ROOT/"data"
-ITEM_URL="https://apis.data.go.kr/1220000/Itemtrade/getItemtradeList"
-
-INDUSTRY_ORDER=["반도체","자동차","석유제품","석유화학","일반기계","철강","선박","자동차부품",
-"무선통신기기","디스플레이","섬유","가전","컴퓨터","바이오헬스","이차전지","전기기기","비철금속",
-"농수산식품","화장품","생활용품"]
-REGION_ORDER=["중국","미국","아세안","EU","일본","중남미","인도","중동","CIS"]
-
-@st.cache_data(ttl=300,show_spinner=False)
-def load_snapshots():
-    m=pd.read_csv(DATA/"trade_monthly.csv",encoding="utf-8-sig")
-    i=pd.read_csv(DATA/"trade_industry.csv",encoding="utf-8-sig")
-    r=pd.read_csv(DATA/"trade_region.csv",encoding="utf-8-sig")
-    try:
-        status=json.loads((DATA/"customs_update_status.json").read_text(encoding="utf-8"))
-    except Exception:
-        status={}
-    return m,i,r,status
-
-def get_key():
-    try:return unquote(str(st.secrets["DATA_GO_KR_SERVICE_KEY"]).strip())
-    except:return None
-
-
-def _digits(v):
-    # 정규식 모듈에 의존하지 않고 숫자만 추출
-    return "".join(ch for ch in str(v or "").split(".0")[0] if ch.isdigit())
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_hsk_codebook(path_str, file_mtime):
-    """
-    공식 엑셀의 HSK코드표를 구조가 조금 달라도 읽는다.
-    - 첫 행이 바로 헤더인 경우
-    - 위쪽에 제목/주석행이 있고 몇 행 뒤에 HSK/품명 헤더가 있는 경우
-    모두 지원한다.
-    """
-    p = Path(path_str)
-    raw = pd.read_excel(p, sheet_name="HSK코드표", header=None, dtype=str)
-    if raw.empty:
-        return pd.DataFrame(columns=["code","name"])
-
-    # 첫 30행에서 HSK 코드열과 품명열이 함께 있는 헤더행을 탐색
-    header_row = None
-    code_col = None
-    name_col = None
-
-    for ridx in range(min(30, len(raw))):
-        vals = [str(v).strip() if pd.notna(v) else "" for v in raw.iloc[ridx].tolist()]
-        for cidx, val in enumerate(vals):
-            u = val.upper().replace(" ", "")
-            if u in ("HSK","HSK코드","HS코드","HS") or ("HSK" in u and "명" not in u):
-                # 같은 행에서 품명 후보를 찾음
-                for nidx, nval in enumerate(vals):
-                    if nidx == cidx:
-                        continue
-                    nv = nval.replace(" ", "")
-                    if any(k in nv for k in ["품명","품목명","한글품명","한글명","명칭","HSK명"]):
-                        header_row, code_col, name_col = ridx, cidx, nidx
-                        break
-            if header_row is not None:
-                break
-        if header_row is not None:
-            break
-
-    # 헤더명이 비정형이면 각 열 내용 패턴으로 자동 추정
-    if header_row is None:
-        best_code = (-1, None)
-        best_name = (-1, None)
-
-        for cidx in range(raw.shape[1]):
-            s = raw.iloc[:, cidx].fillna("").astype(str).str.strip()
-            digit_score = s.map(lambda x: _digits(x)).str.fullmatch(r"\d{2,10}", na=False).sum()
-            if digit_score > best_code[0]:
-                best_code = (int(digit_score), cidx)
-
-            # 한글이 많이 들어 있고 숫자코드 열이 아닌 열을 품명 후보로 판단
-            text_score = s.map(lambda x: any("가" <= ch <= "힣" for ch in x)).sum()
-            if text_score > best_name[0]:
-                best_name = (int(text_score), cidx)
-
-        code_col = best_code[1]
-        name_col = best_name[1]
-        header_row = -1
-
-    if code_col is None or name_col is None or code_col == name_col:
-        return pd.DataFrame(columns=["code","name"])
-
-    d = raw.iloc[header_row+1 if header_row >= 0 else 0:, [code_col, name_col]].copy()
-    d.columns = ["code","name"]
-    d["code"] = d["code"].map(_digits)
-    d["name"] = d["name"].fillna("").astype(str).str.strip()
-
-    # 2/4/6/10단위 코드 모두 보존
-    d = d[d["code"].str.fullmatch(r"\d{2}|\d{4}|\d{6}|\d{10}", na=False)]
-    d = d[~d["name"].isin(["","nan","None","-"])]
-    return d.drop_duplicates(["code","name"]).reset_index(drop=True)
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_hsk_mti_lookup(path_str, file_mtime):
-    """HS prefix가 어느 20대 MTI 품목에 연결되는지 보여주기 위한 보조표."""
-    p = Path(path_str)
-    d = pd.read_excel(p, sheet_name="HSK-MTI 연계표", dtype=str)
-    if not {"HSK","구분"}.issubset(d.columns):
-        return pd.DataFrame(columns=["hsk","industry"])
-    d = d[["HSK","구분"]].copy()
-    d["hsk"] = d["HSK"].map(_digits)
-    d["industry"] = d["구분"].astype(str).str.strip()
-    d = d[d["hsk"].str.fullmatch(r"\d{10}", na=False)]
-    d = d[d["industry"].isin(INDUSTRY_ORDER)]
-    return d[["hsk","industry"]].drop_duplicates()
-
-def lookup_hs_info(hs):
-    """
-    API 호출 없이 공식 HSK 코드표에서 명칭을 즉시 찾는다.
-
-    반환:
-      exact_name: 입력 코드와 정확히 일치하는 공식 품명(있을 때)
-      groups: 관련 20대 MTI 품목
-      examples: 상위코드 입력 시 관련 세부품목 대표명 최대 3개
-      matched_count: 입력 prefix와 일치하는 코드 수
-    """
-    code = _digits(hs)
-    if not code:
-        return None, [], [], 0
-
-    exact_name = None
-    groups = []
-    examples = []
-    matched_count = 0
-    p = DATA / "mti_hsk_mapping.xlsx"
-
-    if not p.exists():
-        return None, [], [], 0
-
-    try:
-        cb = load_hsk_codebook(str(p), p.stat().st_mtime_ns)
-
-        exact = cb[cb["code"] == code]
-        if not exact.empty:
-            exact_name = str(exact.iloc[0]["name"])
-
-        # 4/6단위처럼 정확한 상위품명이 없더라도 세부코드에서 대표 품명을 표시
-        matched = cb[cb["code"].str.startswith(code, na=False)].copy()
-        matched_count = len(matched)
-        if not matched.empty:
-            examples = matched["name"].dropna().drop_duplicates().head(3).tolist()
-
-        mp = load_hsk_mti_lookup(str(p), p.stat().st_mtime_ns)
-        matched_mp = mp[mp["hsk"].str.startswith(code, na=False)]
-        groups = matched_mp["industry"].drop_duplicates().tolist()
-
-    except Exception:
-        pass
-
-    return exact_name, groups, examples, matched_count
-
-def to_num(v):
-    try:return float(str(v).replace(",",""))
-    except:return 0.0
-
-def recent_window():
-    now=pd.Period(date.today().strftime("%Y-%m"),freq="M")
-    end=now-1; start=end-11
-    return start.strftime("%Y%m"),end.strftime("%Y%m")
-
-@st.cache_data(ttl=3600,show_spinner=False)
-def customs_item(key,hs):
-    s,e=recent_window()
-    rr=requests.get(ITEM_URL,params={"serviceKey":key,"strtYymm":s,"endYymm":e,"hsSgn":hs},timeout=(5,12))
-    rr.raise_for_status()
-    root=ET.fromstring(rr.content)
-    code=root.findtext(".//resultCode"); msg=root.findtext(".//resultMsg") or ""
-    if code not in (None,"00"):raise RuntimeError(f"{code}: {msg}")
-    out=[]
-    for x in root.findall(".//item"):
-        d={c.tag:c.text for c in x}
-        p=d.get("year")
-        if not p or "총계" in p:continue
-        out.append({"period":p,"export":to_num(d.get("expDlr")),"import":to_num(d.get("impDlr"))})
-    z=pd.DataFrame(out)
-    if not z.empty:z=z.groupby("period",as_index=False)[["export","import"]].sum().sort_values("period")
-    return z
-
-def render_trade_table(df,name_col):
-    rows=['<div class="trade-table"><div class="trade-row header"><div class="trade-cell">구분</div><div class="trade-cell num">수출액(억 달러)</div><div class="trade-cell num">전년동월 대비</div></div>']
-    for _,rr in df.iterrows():
-        yoy=float(rr["yoy"]);cls="positive" if yoy>=0 else "negative"
-        rows.append(f'<div class="trade-row"><div class="trade-cell name">{rr[name_col]}</div><div class="trade-cell num">{float(rr["export_usd_100m"]):,.1f}</div><div class="trade-cell num {cls}">{yoy:+.1f}%</div></div>')
-    rows.append("</div>");st.markdown("".join(rows),unsafe_allow_html=True)
-
-def render_horizontal_bar(df,cat):
-    d=df[[cat,"export_usd_100m"]].copy()
-    maxv=max(float(d["export_usd_100m"].max()),1)
-    ch=(alt.Chart(d).mark_bar(cornerRadiusEnd=4,color="#2563EB").encode(
-        y=alt.Y(f"{cat}:N",sort=alt.SortField(field="export_usd_100m",order="descending"),title=None),
-        x=alt.X("export_usd_100m:Q",title="수출액(억 달러)",scale=alt.Scale(domain=[0,maxv*1.08],nice=False)),
-        tooltip=[alt.Tooltip(f"{cat}:N",title="구분"),alt.Tooltip("export_usd_100m:Q",title="억 달러",format=",.1f")]
-    ).properties(height=max(260,len(d)*29)).configure_view(strokeWidth=0,fill="#fff").configure(background="#fff"))
-    st.altair_chart(ch,use_container_width=True)
-
-def render_lines(df):
-    d=df[["period","export_usd_100m","import_usd_100m"]].rename(columns={"export_usd_100m":"수출","import_usd_100m":"수입"})
-    long=d.melt(id_vars=["period"],var_name="구분",value_name="값")
-    ymin=float(long["값"].min());ymax=float(long["값"].max());pad=max((ymax-ymin)*.12,1)
-    base=alt.Chart(long).encode(
-        x=alt.X("period:N",title=None,axis=alt.Axis(labelAngle=-45)),
-        y=alt.Y("값:Q",title="억 달러",scale=alt.Scale(domain=[max(0,ymin-pad),ymax+pad],nice=False)),
-        color=alt.Color("구분:N",title=None,scale=alt.Scale(domain=["수출","수입"],range=["#2563EB","#F59E0B"])),
-        strokeDash=alt.StrokeDash("구분:N",scale=alt.Scale(domain=["수출","수입"],range=[[1,0],[7,4]]),legend=None),
-        tooltip=["period:N","구분:N",alt.Tooltip("값:Q",format=",.1f")]
-    )
-    ch=(base.mark_line(strokeWidth=3)+base.mark_point(filled=True,size=55)).properties(height=320).configure_view(strokeWidth=0,fill="#fff").configure(background="#fff")
-    st.altair_chart(ch,use_container_width=True)
-
-st.markdown("""
-<style>
-html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{background:#f4f7fb!important;color:#18202a!important;color-scheme:light!important}
-[data-testid="stHeader"]{background:rgba(244,247,251,.96)!important}.block-container{max-width:1200px;padding-top:1.1rem;padding-bottom:3rem}
-.hero{background:#0f2747;color:#fff;border-radius:18px;padding:22px 24px;margin-bottom:12px}.hero-title{font-size:30px;font-weight:850}.hero-sub{color:#dbe7f5;font-size:14px;margin-top:4px}
-.info-card{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:16px}.lab{font-size:12px;color:#667085;font-weight:700}.val{font-size:23px;font-weight:850;margin:7px 0}
-.trade-table{width:100%;border:1px solid #dfe5ee;border-radius:14px;overflow:hidden;background:#fff}.trade-row{display:grid;grid-template-columns:minmax(120px,1.2fr) 1fr 1fr;align-items:center;border-bottom:1px solid #e5eaf1;background:#fff}.trade-row:last-child{border-bottom:0}.trade-row.header{background:#eaf0f7;font-size:12px;font-weight:800;color:#475467}.trade-cell{padding:11px 13px;font-size:14px}.trade-cell.name{font-weight:800}.trade-cell.num{text-align:right}.positive{color:#067647;font-weight:800}.negative{color:#b42318;font-weight:800}
-.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:10px 0 20px}
-.summary-box{background:#fff;border:1px solid #dfe5ee;border-radius:14px;padding:15px 15px 14px 17px;box-shadow:0 3px 10px rgba(16,24,40,.06);min-height:112px}
-.summary-box:nth-child(1){border-left:4px solid #2563EB}
-.summary-box:nth-child(2){border-left:4px solid #7C3AED}
-.summary-box:nth-child(3){border-left:4px solid #059669}
-.summary-box:nth-child(4){border-left:4px solid #D97706}
-.slabel{font-size:12px;color:#667085;font-weight:750;letter-spacing:.01em}
-.svalue{font-size:24px;font-weight:850;margin-top:8px;color:#18202a}
-.snote{font-size:12px;color:#475467;margin-top:6px;line-height:1.35}
-.hs-name-card{background:#fff;border:1px solid #d7e0ea;border-left:4px solid #2563EB;border-radius:12px;padding:13px 15px;margin:8px 0 14px;box-shadow:0 2px 8px rgba(16,24,40,.05)}
-.hs-code-title{font-size:18px;font-weight:850;color:#18202a}
-.hs-sub{font-size:12px;color:#667085;margin-top:5px}
-.source{background:#f8fafc;border:1px solid #e2e8f0;color:#475467;border-radius:12px;padding:11px 13px;font-size:12px}
-@media(max-width:760px){.summary-grid{grid-template-columns:1fr 1fr;gap:10px}.summary-box{min-height:105px;padding:13px}.svalue{font-size:20px}.trade-row{grid-template-columns:minmax(100px,1.2fr) .9fr .9fr}.trade-cell{padding:10px 8px;font-size:12px}}
-</style>""",unsafe_allow_html=True)
-
-st.markdown('<div class="hero"><div class="hero-title">🇰🇷 한국무역 한눈에 보기</div><div class="hero-sub">관세청 확정 통계 · 20대 주요 수출품목 · 9대 주요 수출지역</div></div>',unsafe_allow_html=True)
-
-MENU=["🇰🇷 전체 무역","🏭 20대 품목","🌏 9대 지역","🔎 관세청 상세조회"]
-page=st.segmented_control("메뉴",MENU,default=MENU[0],selection_mode="single",label_visibility="collapsed") or MENU[0]
-
-m,i,r,status=load_snapshots()
-latest=str(m["period"].max())
-source_ok=status.get("source")=="customs" and not status.get("errors")
-
-def latest_slice(df, name_col):
-    p=str(df["period"].max())
-    return p, df[df["period"].astype(str)==p].copy()
-
-ind_period, li = latest_slice(i, "industry")
-reg_period, lr = latest_slice(r, "region")
-
-if page=="🇰🇷 전체 무역":
-    st.subheader(f"대한민국 무역 Dashboard · {latest}")
-    latestrow=m[m["period"].astype(str)==latest].iloc[-1]
-
-    c1,c2,c3=st.columns(3)
-    vals=[
-        ("수출",f"{latestrow['export_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latestrow.get('export_yoy',0):+.1f}%"),
-        ("수입",f"{latestrow['import_usd_100m']:,.1f}억 달러",f"전년동월 대비 {latestrow.get('import_yoy',0):+.1f}%"),
-        ("무역수지",f"{latestrow['balance_usd_100m']:+,.1f}억 달러","관세청 자동갱신" if source_ok else "최근 저장자료"),
-    ]
-    for col,(a,b,c) in zip([c1,c2,c3],vals):
-        with col:
-            st.markdown(
-                f'<div class="info-card"><div class="lab">{a}</div>'
-                f'<div class="val">{b}</div><div class="lab">{c}</div></div>',
-                unsafe_allow_html=True
-            )
-
-    # 이번 달 주요 특징: 저장된 20대 품목/9대 지역만 사용하므로 즉시 표시
-    if not li.empty and not lr.empty:
-        inc_count=int((li["yoy"]>0).sum())
-        top_export=li.sort_values("export_usd_100m",ascending=False).iloc[0]
-        top_growth=li.sort_values("yoy",ascending=False).iloc[0]
-        down=lr.sort_values("yoy").iloc[0]
-
-        st.markdown("### 이번 달 주요 특징")
-        st.markdown(
-            f'<div class="summary-grid">'
-            f'<div class="summary-box"><div class="slabel">20대 품목 증가</div>'
-            f'<div class="svalue">{inc_count}개 / 20개</div><div class="snote">전년동월 대비</div></div>'
-            f'<div class="summary-box"><div class="slabel">최대 수출 품목</div>'
-            f'<div class="svalue">{top_export["industry"]}</div><div class="snote">수출액 {top_export["export_usd_100m"]:.1f}억 달러</div></div>'
-            f'<div class="summary-box"><div class="slabel">증가율 1위</div>'
-            f'<div class="svalue">{top_growth["industry"]}</div><div class="snote">전년동월 대비 {top_growth["yoy"]:+.1f}%</div></div>'
-            f'<div class="summary-box"><div class="slabel">지역 증감률 최저</div>'
-            f'<div class="svalue">{down["region"]}</div><div class="snote">전년동월 대비 {down["yoy"]:+.1f}%</div></div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-
-        st.markdown("### 품목·지역 한눈에 보기")
-        a,b=st.columns(2)
-        with a:
-            st.caption("20대 품목 수출 상위 10개")
-            render_horizontal_bar(
-                li.sort_values("export_usd_100m",ascending=False).head(10),
-                "industry"
-            )
-        with b:
-            st.caption("9대 주요 수출지역")
-            render_horizontal_bar(
-                lr.sort_values("export_usd_100m",ascending=False),
-                "region"
-            )
-
-    if len(m)>1:
-        st.markdown("### 최근 12개월 통관 시계열")
-        render_lines(m.sort_values("period").tail(12))
-
-elif page=="🏭 20대 품목":
-    st.subheader(f"2026 MTI 기준 20대 주력 수출품목 · {ind_period}")
-    st.caption("※ 2026년 산업통상부 MTI 개편 기준 · 관세청 HSK 통계를 공식 HSK-MTI 연계표로 재집계")
-
-    left,right=st.columns([1.25,1])
-    with left:
-        render_trade_table(li.sort_values("export_usd_100m",ascending=False),"industry")
-    with right:
-        render_horizontal_bar(li.sort_values("export_usd_100m",ascending=False),"industry")
-
-    selected=st.selectbox(
-        "품목 선택",
-        INDUSTRY_ORDER,
-        index=0,
-        help="품목명을 입력하거나 목록에서 선택할 수 있습니다."
-    )
-    rr=li[li["industry"]==selected]
-    if not rr.empty:
-        rr=rr.iloc[0]
-        a,b=st.columns(2)
-        a.metric(f"{selected} 수출액",f"{rr['export_usd_100m']:.1f}억 달러")
-        b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
-
-elif page=="🌏 9대 지역":
-    st.subheader(f"9대 주요 수출지역 · {reg_period}")
-    c1,c2=st.columns([1,1])
-    with c1:
-        render_trade_table(lr,"region")
-    with c2:
-        render_horizontal_bar(lr.sort_values("export_usd_100m",ascending=False),"region")
-    sel=st.selectbox("지역 선택",REGION_ORDER)
-    rr=lr[lr["region"]==sel]
-    if not rr.empty:
-        rr=rr.iloc[0]
-        a,b=st.columns(2)
-        a.metric(f"대{sel} 수출",f"{rr['export_usd_100m']:.1f}억 달러")
-        b.metric("전년동월 대비",f"{rr['yoy']:+.1f}%")
-
-elif page=="🔎 관세청 상세조회":
-    st.subheader("관세청 HS 상세조회")
-    st.caption("HS 2·4·6·10단위 코드를 입력할 수 있습니다. 품목명은 저장된 공식 HSK 코드표에서 먼저 확인합니다.")
-    key=get_key()
-    hs=st.text_input("HS 코드",value="8542",help="예: 8542 전자집적회로, 8703 승용자동차")
-
-    hs_code=_digits(hs)
-    hs_name,hs_groups,hs_examples,hs_match_count=lookup_hs_info(hs_code)
-
-    if hs_code:
-        title=f"HS {hs_code}"
-        if hs_name:
-            title += f" · {hs_name}"
-
-        notes=[]
-        if not hs_name and hs_examples:
-            notes.append("대표 세부품목: " + " / ".join(hs_examples))
-        if hs_groups:
-            shown=" · ".join(hs_groups[:4])
-            if len(hs_groups)>4:
-                shown += " 외"
-            notes.append("관련 MTI: " + shown)
-        if hs_match_count and not hs_name:
-            notes.append(f"관련 HSK 세부코드 {hs_match_count:,}개")
-
-        note_html="".join(f'<div class="hs-sub">{n}</div>' for n in notes)
-
-        st.markdown(
-            f'<div class="hs-name-card"><div class="hs-code-title">{title}</div>{note_html}</div>',
-            unsafe_allow_html=True
-        )
-
-    if st.button("조회",type="primary"):
-        if not key:
-            st.warning("Streamlit Secrets에 인증키가 필요합니다.")
-        elif not hs_code:
-            st.warning("HS 코드를 입력해 주세요.")
-        else:
-            try:
-                with st.spinner("선택한 HS 코드만 조회 중…"):
-                    d=customs_item(key,hs_code)
-                if d.empty:
-                    st.info("조회 결과 없음")
-                else:
-                    show=d.copy()
-                    show["export_usd_100m"]=show["export"]/1e8
-                    show["import_usd_100m"]=show["import"]/1e8
-                    result_title=f"HS {hs_code}"
-                    if hs_name:
-                        result_title += f" · {hs_name}"
-                    st.markdown(f"### {result_title} 최근 12개월")
-                    render_lines(show[["period","export_usd_100m","import_usd_100m"]])
-            except requests.exceptions.ConnectTimeout:
-                st.warning("현재 관세청 API에 연결되지 않습니다. 5초 후 조회를 중단했습니다. 잠시 뒤 다시 시도해 주세요.")
-            except requests.exceptions.ReadTimeout:
-                st.warning("관세청 API 응답이 지연되고 있습니다. 오래 기다리지 않도록 조회를 중단했습니다.")
-            except requests.exceptions.ConnectionError:
-                st.warning("현재 관세청 API 연결이 원활하지 않습니다. 잠시 뒤 다시 시도해 주세요.")
-            except Exception as e:
-                st.error(str(e))
-
-caption="관세청 확정 통계 자동저장" if source_ok else "최근 저장자료"
-st.markdown(
-    f'<div class="source"><b>자료:</b> {caption} · 한국무역협회 2026 HSK-MTI 연계표 · '
-    f'학생 화면은 API 대기 없이 즉시 표시됩니다.</div>',
-    unsafe_allow_html=True
+from trade_dashboard.api import PublicDataClient, PublicDataError
+from trade_dashboard.config import (
+    APP_NAME,
+    APP_VERSION,
+    INDUSTRY_CSV,
+    MONTHLY_CSV,
+    MTI_MAJOR_CSV,
+    MTI_MAPPING_XLSX,
+    REGION_CSV,
+    SERVICE_KEY_NAME,
+    UPDATE_STATUS_JSON,
 )
+from trade_dashboard.data import (
+    annual_total,
+    csv_bytes,
+    load_industry,
+    load_monthly,
+    load_region,
+    read_status,
+    recent_months,
+)
+from trade_dashboard.mti import load_major_codes, load_mti_mapping, related_major_industries
+from trade_dashboard.utils import latest_complete_month, shift_month, validate_hs_code
+
+st.set_page_config(page_title=APP_NAME, page_icon="🇰🇷", layout="wide")
+
+COLORS = {"수출": "#0B5AA6", "수입": "#E97828", "무역수지": "#16836B"}
+
+
+def _secret_key() -> str:
+    try:
+        return str(st.secrets.get(SERVICE_KEY_NAME, "")).strip()
+    except (FileNotFoundError, KeyError, StreamlitSecretNotFoundError):
+        return ""
+
+
+@st.cache_data(ttl=21_600, show_spinner=False)
+def query_hs_cached(hs_code: str, start: str, end: str) -> pd.DataFrame:
+    key = _secret_key()
+    if not key:
+        raise PublicDataError("Streamlit Secrets에 공공데이터 인증키가 설정되지 않았습니다.")
+    return PublicDataClient(key).fetch_hs(start, end, hs_code)
+
+
+def enforce_hs_rate_limit() -> None:
+    now = time.time()
+    history = [stamp for stamp in st.session_state.get("hs_query_history", []) if now - stamp < 600]
+    if history and now - history[-1] < 2:
+        raise ValueError("연속 조회 간격은 2초 이상이어야 합니다. 잠시 후 다시 눌러 주세요.")
+    if len(history) >= 10:
+        raise ValueError("한 세션에서는 10분에 10회까지 조회할 수 있습니다.")
+    history.append(now)
+    st.session_state["hs_query_history"] = history
+
+
+def usd_100m(value: float) -> str:
+    return f"{value / 100_000_000:,.1f}억 달러"
+
+
+def _period_label(period: str) -> str:
+    return f"{period[:4]}년 {int(period[5:]):d}월"
+
+
+def _latest_available(*frames: pd.DataFrame) -> str:
+    periods = []
+    for frame in frames:
+        if not frame.empty:
+            periods.extend(frame["period"].dropna().astype(str).tolist())
+    return max(periods) if periods else latest_complete_month()
+
+
+def trade_charts(frame: pd.DataFrame, title: str) -> None:
+    if frame.empty:
+        st.info("표시할 자료가 없습니다.")
+        return
+    data = frame.copy()
+    data["period_date"] = pd.to_datetime(data["period"] + "-01")
+    data["수출"] = data["export_usd"] / 100_000_000
+    data["수입"] = data["import_usd"] / 100_000_000
+    data["무역수지"] = data["balance_usd"] / 100_000_000
+    lines = data.melt(
+        id_vars=["period_date"],
+        value_vars=["수출", "수입"],
+        var_name="구분",
+        value_name="억 달러",
+    )
+    line_chart = (
+        alt.Chart(lines, title=title)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("period_date:T", title=None, axis=alt.Axis(format="%Y-%m")),
+            y=alt.Y("억 달러:Q", title="억 달러", scale=alt.Scale(zero=False)),
+            color=alt.Color(
+                "구분:N",
+                scale=alt.Scale(domain=["수출", "수입"], range=[COLORS["수출"], COLORS["수입"]]),
+                legend=alt.Legend(orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip("period_date:T", title="연월", format="%Y-%m"),
+                "구분:N",
+                alt.Tooltip("억 달러:Q", format=",.1f"),
+            ],
+        )
+        .properties(height=330)
+        .interactive()
+    )
+    balance = (
+        alt.Chart(data, title="월별 무역수지")
+        .mark_bar(color=COLORS["무역수지"])
+        .encode(
+            x=alt.X("period_date:T", title=None, axis=alt.Axis(format="%Y-%m")),
+            y=alt.Y("무역수지:Q", title="억 달러"),
+            color=alt.condition(alt.datum["무역수지"] >= 0, alt.value(COLORS["무역수지"]), alt.value("#C63D3D")),
+            tooltip=[
+                alt.Tooltip("period_date:T", title="연월", format="%Y-%m"),
+                alt.Tooltip("무역수지:Q", format=",.1f"),
+            ],
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(line_chart, use_container_width=True)
+    st.altair_chart(balance, use_container_width=True)
+
+
+def latest_metrics(frame: pd.DataFrame, period: str) -> None:
+    row = frame[frame["period"] == period]
+    if row.empty:
+        st.info("최신 월 지표가 없습니다.")
+        return
+    current = row.iloc[-1]
+    previous_period = shift_month(period, -12)
+    previous = frame[frame["period"] == previous_period]
+
+    def delta(column: str) -> str | None:
+        if previous.empty or float(previous.iloc[-1][column]) == 0:
+            return None
+        rate = (float(current[column]) / float(previous.iloc[-1][column]) - 1) * 100
+        return f"전년동월 대비 {rate:+.1f}%"
+
+    columns = st.columns(3)
+    columns[0].metric("수출", usd_100m(float(current["export_usd"])), delta("export_usd"))
+    columns[1].metric("수입", usd_100m(float(current["import_usd"])), delta("import_usd"))
+    columns[2].metric("무역수지", usd_100m(float(current["balance_usd"])))
+
+
+def long_term_chart(frame: pd.DataFrame) -> None:
+    annual = annual_total(frame)
+    if annual.empty:
+        return
+    data = annual.copy()
+    data["수출"] = data["export_usd"] / 100_000_000
+    data["수입"] = data["import_usd"] / 100_000_000
+    melted = data.melt(id_vars=["year"], value_vars=["수출", "수입"], var_name="구분", value_name="억 달러")
+    chart = (
+        alt.Chart(melted, title="이용 가능한 전체 시계열의 연도별 무역")
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("year:O", title="연도"),
+            y=alt.Y("억 달러:Q", title="억 달러", scale=alt.Scale(zero=False)),
+            color=alt.Color("구분:N", scale=alt.Scale(domain=["수출", "수입"], range=[COLORS["수출"], COLORS["수입"]])),
+            tooltip=["year:O", "구분:N", alt.Tooltip("억 달러:Q", format=",.1f")],
+        )
+        .properties(height=350)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
+    col1, col2 = st.columns(2)
+    col1.download_button("월별 CSV 다운로드", csv_bytes(frame), "trade_monthly.csv", "text/csv")
+    col2.download_button("연도별 CSV 다운로드", csv_bytes(annual), "trade_annual.csv", "text/csv")
+
+
+def comparison_table(frame: pd.DataFrame, period: str, code_col: str, name_col: str) -> pd.DataFrame:
+    current = frame[frame["period"] == period].copy()
+    previous = frame[frame["period"] == shift_month(period, -12)][[code_col, "export_usd"]].rename(
+        columns={"export_usd": "export_prev"}
+    )
+    current = current.merge(previous, how="left", on=code_col)
+    current["수출 증감률(%)"] = (current["export_usd"] / current["export_prev"] - 1) * 100
+    current["수출(억 달러)"] = current["export_usd"] / 100_000_000
+    current["수입(억 달러)"] = current["import_usd"] / 100_000_000
+    current["무역수지(억 달러)"] = current["balance_usd"] / 100_000_000
+    return current[
+        [code_col, name_col, "수출(억 달러)", "수입(억 달러)", "무역수지(억 달러)", "수출 증감률(%)"]
+    ].sort_values("수출(억 달러)", ascending=False)
+
+
+def category_tab(frame: pd.DataFrame, kind: str) -> None:
+    if frame.empty:
+        st.warning("아직 과거자료가 구축되지 않았습니다. GitHub Actions에서 최초 구축을 실행해 주세요.")
+        return
+    if kind == "industry":
+        code_col, name_col, label = "industry_code", "industry_name", "품목"
+    else:
+        code_col, name_col, label = "region_code", "region_name", "지역"
+    latest = max(frame["period"])
+    st.caption(f"최신 비교 기준: {_period_label(latest)}")
+    table = comparison_table(frame, latest, code_col, name_col)
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "수출(억 달러)": st.column_config.NumberColumn(format="%.1f"),
+            "수입(억 달러)": st.column_config.NumberColumn(format="%.1f"),
+            "무역수지(억 달러)": st.column_config.NumberColumn(format="%.1f"),
+            "수출 증감률(%)": st.column_config.NumberColumn(format="%+.1f"),
+        },
+    )
+    options = frame[[code_col, name_col]].drop_duplicates().sort_values(name_col)
+    option_map = {f"{row[name_col]} ({row[code_col]})": row[code_col] for _, row in options.iterrows()}
+    selected_label = st.selectbox(f"{label} 선택", list(option_map), key=f"{kind}_select")
+    months = (
+        12
+        if st.radio("조회기간", ["최근 12개월", "최근 5년"], horizontal=True, key=f"{kind}_period") == "최근 12개월"
+        else 60
+    )
+    selected = frame[frame[code_col].astype(str) == str(option_map[selected_label])]
+    selected = recent_months(selected, months)
+    trade_charts(selected, f"{selected_label} 월별 수출입")
+    st.download_button(
+        f"{label} CSV 다운로드",
+        csv_bytes(selected),
+        f"trade_{kind}_{option_map[selected_label]}.csv",
+        "text/csv",
+        key=f"{kind}_download",
+    )
+
+
+def hs_tab(latest_period: str) -> None:
+    st.subheader("HS 상세조회")
+    st.caption("HS 2자리·4자리·6자리만 조회합니다. 조회 버튼을 누를 때만 관세청 API를 호출합니다.")
+    with st.form("hs_lookup_form"):
+        hs_input = st.text_input("HS 코드", placeholder="예: 85, 8542, 854231", max_chars=6)
+        period_label = st.radio("조회기간", ["최근 12개월", "최근 5년"], horizontal=True)
+        submitted = st.form_submit_button("조회", type="primary")
+
+    if submitted:
+        try:
+            hs_code = validate_hs_code(hs_input)
+            enforce_hs_rate_limit()
+            months = 12 if period_label == "최근 12개월" else 60
+            start = shift_month(latest_period, -(months - 1))
+            with st.spinner("관세청 자료를 조회하고 있습니다."):
+                result = query_hs_cached(hs_code, start, latest_period)
+            if result.empty:
+                st.warning("해당 조건의 자료가 없습니다. 인증키 권한과 HS 코드를 확인해 주세요.")
+            else:
+                st.session_state["hs_result"] = result
+                st.session_state["hs_code"] = hs_code
+                st.session_state["hs_period_label"] = period_label
+        except (ValueError, PublicDataError) as exc:
+            st.error(str(exc))
+
+    result = st.session_state.get("hs_result")
+    hs_code = st.session_state.get("hs_code")
+    if result is None or not hs_code:
+        if not _secret_key():
+            st.info(f"Streamlit Settings → Secrets에 `{SERVICE_KEY_NAME}`를 설정하면 조회할 수 있습니다.")
+        return
+
+    result = result.copy()
+    latest = max(result["period"])
+    latest_rows = result[result["period"] == latest]
+    # 2·4·6자리 조회는 월별 합계가 한 행이어야 하나, 혹시 여러 행이면 안전하게 합산한다.
+    summary = latest_rows[["export_usd", "import_usd", "balance_usd"]].sum()
+    hs_names = [name for name in result["hs_name"].dropna().astype(str).unique() if name]
+    st.markdown(f"#### HS {hs_code} · {hs_names[0] if hs_names else '공식 명칭 미제공'}")
+
+    try:
+        mapping = load_mti_mapping(MTI_MAPPING_XLSX)
+        major = load_major_codes(MTI_MAJOR_CSV)
+        related = related_major_industries(hs_code, mapping, major)
+        st.caption("관련 20대 MTI 품목: " + (", ".join(related) if related else "해당 없음"))
+    except (FileNotFoundError, ValueError):
+        st.caption("관련 MTI 품목은 공식 2026 MTI-HSK 연계표를 넣은 뒤 표시됩니다.")
+
+    columns = st.columns(3)
+    columns[0].metric("최신 월 수출", usd_100m(float(summary["export_usd"])))
+    columns[1].metric("최신 월 수입", usd_100m(float(summary["import_usd"])))
+    columns[2].metric("최신 월 무역수지", usd_100m(float(summary["balance_usd"])))
+    monthly = result.groupby("period", as_index=False)[["export_usd", "import_usd", "balance_usd"]].sum()
+    trade_charts(monthly, f"HS {hs_code} 월별 수출입")
+    st.download_button("HS 조회결과 CSV 다운로드", csv_bytes(result), f"hs_{hs_code}_trade.csv", "text/csv")
+
+
+def main() -> None:
+    st.title(f"🇰🇷 {APP_NAME}")
+    st.caption(f"관세청 수출입무역통계 · 앱 버전 {APP_VERSION}")
+
+    try:
+        monthly = load_monthly(MONTHLY_CSV)
+        industry = load_industry(INDUSTRY_CSV)
+        region = load_region(REGION_CSV)
+    except ValueError as exc:
+        st.error(f"저장 데이터 검증 오류: {exc}")
+        st.stop()
+
+    latest = _latest_available(monthly, industry, region)
+    status = read_status(UPDATE_STATUS_JSON)
+    with st.sidebar:
+        st.header("데이터 안내")
+        st.write(f"가용 최신월: **{latest}**")
+        if status.get("checked_at_utc"):
+            checked = str(status["checked_at_utc"]).replace("T", " ")[:19]
+            st.caption(f"마지막 자동 확인(UTC): {checked}")
+        st.caption("금액은 미화 달러 기준입니다. 수출은 FOB, 수입은 CIF 기준입니다.")
+        st.markdown(
+            "[관세청 수출입총괄](https://www.data.go.kr/data/15102108/openapi.do)  \n"
+            "[관세청 품목별 실적](https://www.data.go.kr/data/15101609/openapi.do)"
+        )
+
+    total_tab, industry_tab, region_tab, hs_lookup_tab = st.tabs(["전체 무역", "20대 품목", "9대 지역", "HS 상세조회"])
+
+    with total_tab:
+        st.subheader("전체 무역")
+        if monthly.empty:
+            st.warning("전체무역 과거자료가 없습니다. GitHub Actions에서 최초 구축을 실행해 주세요.")
+        else:
+            latest_total = max(monthly["period"])
+            st.caption(f"최신 기준: {_period_label(latest_total)}")
+            latest_metrics(monthly, latest_total)
+            selection = st.radio("월별 조회기간", ["최근 12개월", "최근 5년"], horizontal=True, key="total_period")
+            months = 12 if selection == "최근 12개월" else 60
+            trade_charts(recent_months(monthly, months), f"{selection} 월별 수출입")
+            long_term_chart(monthly)
+
+    with industry_tab:
+        st.subheader("20대 주요 품목")
+        st.caption("2026년 개편 MTI 기준입니다. 공식 개편의 소급 비교 가능 기간은 2022년 이후입니다.")
+        category_tab(industry, "industry")
+
+    with region_tab:
+        st.subheader("9대 주요 수출지역")
+        st.caption("미국·중국·아세안·EU(27)·일본·중남미·인도·중동·CIS를 국가별 관세청 자료로 집계합니다.")
+        category_tab(region, "region")
+
+    with hs_lookup_tab:
+        hs_tab(latest)
+
+    st.divider()
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    st.caption(
+        f"화면 생성 시각(KST): {now_kst.strftime('%Y-%m-%d %H:%M')} · 인증키와 인증키가 포함된 요청 주소는 화면과 로그에 표시하지 않습니다."
+    )
+
+
+if __name__ == "__main__":
+    main()

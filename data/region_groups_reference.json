@@ -1,124 +1,52 @@
 {
-  "note": "v9.0 fixed ISO alpha-2 country groups for Customs nation API aggregation. Adjust here/app.py if an official regional membership list is adopted.",
-  "regions": {
-    "중국": [
-      "CN"
-    ],
-    "미국": [
-      "US"
-    ],
-    "아세안": [
-      "BN",
-      "ID",
-      "KH",
-      "LA",
-      "MM",
-      "MY",
-      "PH",
-      "SG",
-      "TH",
-      "TL",
-      "VN"
-    ],
-    "EU": [
-      "AT",
-      "BE",
-      "BG",
-      "CY",
-      "CZ",
-      "DE",
-      "DK",
-      "EE",
-      "ES",
-      "FI",
-      "FR",
-      "GR",
-      "HR",
-      "HU",
-      "IE",
-      "IT",
-      "LT",
-      "LU",
-      "LV",
-      "MT",
-      "NL",
-      "PL",
-      "PT",
-      "RO",
-      "SE",
-      "SI",
-      "SK"
-    ],
-    "일본": [
-      "JP"
-    ],
-    "중남미": [
-      "AG",
-      "AR",
-      "BB",
-      "BO",
-      "BR",
-      "BS",
-      "BZ",
-      "CL",
-      "CO",
-      "CR",
-      "CU",
-      "DM",
-      "DO",
-      "EC",
-      "GD",
-      "GT",
-      "GY",
-      "HN",
-      "HT",
-      "JM",
-      "KN",
-      "LC",
-      "MX",
-      "NI",
-      "PA",
-      "PE",
-      "PY",
-      "SR",
-      "SV",
-      "TT",
-      "UY",
-      "VC",
-      "VE"
-    ],
-    "인도": [
-      "IN"
-    ],
-    "중동": [
-      "AE",
-      "BH",
-      "IL",
-      "IQ",
-      "IR",
-      "JO",
-      "KW",
-      "LB",
-      "OM",
-      "QA",
-      "SA",
-      "SY",
-      "TR",
-      "YE"
-    ],
-    "CIS": [
-      "AM",
-      "AZ",
-      "BY",
-      "GE",
-      "KG",
-      "KZ",
-      "MD",
-      "RU",
-      "TJ",
-      "TM",
-      "UA",
-      "UZ"
-    ]
-  }
+  "version": "2026-08-28",
+  "code_system": "ISO 3166-1 alpha-2 / 관세청 국가코드",
+  "note": "산업통상부의 9대 주요 수출지역 명칭을 국가코드 묶음으로 구현한 앱 집계 기준. 그룹 간 중복은 허용하지 않음.",
+  "groups": [
+    {
+      "code": "US",
+      "name": "미국",
+      "country_codes": ["US"]
+    },
+    {
+      "code": "CN",
+      "name": "중국",
+      "country_codes": ["CN"]
+    },
+    {
+      "code": "ASEAN",
+      "name": "아세안",
+      "country_codes": ["BN", "KH", "ID", "LA", "MY", "MM", "PH", "SG", "TH", "TL", "VN"]
+    },
+    {
+      "code": "EU27",
+      "name": "EU(27)",
+      "country_codes": ["AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE"]
+    },
+    {
+      "code": "JP",
+      "name": "일본",
+      "country_codes": ["JP"]
+    },
+    {
+      "code": "LATAM",
+      "name": "중남미",
+      "country_codes": ["AG", "AR", "BS", "BB", "BZ", "BO", "BR", "CL", "CO", "CR", "CU", "DM", "DO", "EC", "SV", "GD", "GT", "GY", "HT", "HN", "JM", "MX", "NI", "PA", "PY", "PE", "KN", "LC", "VC", "SR", "TT", "UY", "VE"]
+    },
+    {
+      "code": "IN",
+      "name": "인도",
+      "country_codes": ["IN"]
+    },
+    {
+      "code": "MIDDLE_EAST",
+      "name": "중동",
+      "country_codes": ["AE", "BH", "EG", "IL", "IQ", "IR", "JO", "KW", "LB", "OM", "PS", "QA", "SA", "SY", "TR", "YE"]
+    },
+    {
+      "code": "CIS",
+      "name": "CIS",
+      "country_codes": ["AM", "AZ", "BY", "GE", "KZ", "KG", "MD", "RU", "TJ", "TM", "UA", "UZ"]
+    }
+  ]
 }
