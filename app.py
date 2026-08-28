@@ -22,7 +22,6 @@ from trade_dashboard.config import (
     UPDATE_STATUS_JSON,
 )
 from trade_dashboard.data import (
-    annual_total,
     csv_bytes,
     load_industry,
     load_monthly,
@@ -46,11 +45,11 @@ def _secret_key() -> str:
 
 
 @st.cache_data(ttl=21_600, show_spinner=False)
-def query_hs_cached(hs_code: str, start: str, end: str) -> pd.DataFrame:
+def query_hs_cached(hs_code: str, period: str) -> pd.DataFrame:
     key = _secret_key()
     if not key:
         raise PublicDataError("Streamlit Secrets에 공공데이터 인증키가 설정되지 않았습니다.")
-    return PublicDataClient(key).fetch_hs(start, end, hs_code)
+    return PublicDataClient(key).fetch_hs(period, period, hs_code)
 
 
 def enforce_hs_rate_limit() -> None:
@@ -154,32 +153,6 @@ def latest_metrics(frame: pd.DataFrame, period: str) -> None:
     columns[2].metric("무역수지", usd_100m(float(current["balance_usd"])))
 
 
-def long_term_chart(frame: pd.DataFrame) -> None:
-    annual = annual_total(frame)
-    if annual.empty:
-        return
-    data = annual.copy()
-    data["수출"] = data["export_usd"] / 100_000_000
-    data["수입"] = data["import_usd"] / 100_000_000
-    melted = data.melt(id_vars=["year"], value_vars=["수출", "수입"], var_name="구분", value_name="억 달러")
-    chart = (
-        alt.Chart(melted, title="이용 가능한 전체 시계열의 연도별 무역")
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("year:O", title="연도"),
-            y=alt.Y("억 달러:Q", title="억 달러", scale=alt.Scale(zero=False)),
-            color=alt.Color("구분:N", scale=alt.Scale(domain=["수출", "수입"], range=[COLORS["수출"], COLORS["수입"]])),
-            tooltip=["year:O", "구분:N", alt.Tooltip("억 달러:Q", format=",.1f")],
-        )
-        .properties(height=350)
-        .interactive()
-    )
-    st.altair_chart(chart, use_container_width=True)
-    col1, col2 = st.columns(2)
-    col1.download_button("월별 CSV 다운로드", csv_bytes(frame), "trade_monthly.csv", "text/csv")
-    col2.download_button("연도별 CSV 다운로드", csv_bytes(annual), "trade_annual.csv", "text/csv")
-
-
 def comparison_table(frame: pd.DataFrame, period: str, code_col: str, name_col: str) -> pd.DataFrame:
     current = frame[frame["period"] == period].copy()
     previous = frame[frame["period"] == shift_month(period, -12)][[code_col, "export_usd"]].rename(
@@ -239,43 +212,42 @@ def category_tab(frame: pd.DataFrame, kind: str) -> None:
 
 def hs_tab(latest_period: str) -> None:
     st.subheader("HS 상세조회")
-    st.caption("HS 2자리·4자리·6자리만 조회합니다. 조회 버튼을 누를 때만 관세청 API를 호출합니다.")
+    st.caption("HS 2자리·4자리·6자리의 선택한 한 달 자료만 조회합니다. 조회 버튼을 누를 때만 API를 호출합니다.")
     with st.form("hs_lookup_form"):
         hs_input = st.text_input("HS 코드", placeholder="예: 85, 8542, 854231", max_chars=6)
-        period_label = st.radio("조회기간", ["최근 12개월", "최근 5년"], horizontal=True)
+        available_periods = [shift_month(latest_period, -offset) for offset in range(60)]
+        selected_period = st.selectbox("조회월", available_periods, format_func=_period_label)
         submitted = st.form_submit_button("조회", type="primary")
 
     if submitted:
         try:
             hs_code = validate_hs_code(hs_input)
             enforce_hs_rate_limit()
-            months = 12 if period_label == "최근 12개월" else 60
-            start = shift_month(latest_period, -(months - 1))
             with st.spinner("관세청 자료를 조회하고 있습니다."):
-                result = query_hs_cached(hs_code, start, latest_period)
+                result = query_hs_cached(hs_code, selected_period)
             if result.empty:
                 st.warning("해당 조건의 자료가 없습니다. 인증키 권한과 HS 코드를 확인해 주세요.")
             else:
                 st.session_state["hs_result"] = result
                 st.session_state["hs_code"] = hs_code
-                st.session_state["hs_period_label"] = period_label
+                st.session_state["hs_period"] = selected_period
         except (ValueError, PublicDataError) as exc:
             st.error(str(exc))
 
     result = st.session_state.get("hs_result")
     hs_code = st.session_state.get("hs_code")
-    if result is None or not hs_code:
+    hs_period = st.session_state.get("hs_period")
+    if result is None or not hs_code or not hs_period:
         if not _secret_key():
             st.info(f"Streamlit Settings → Secrets에 `{SERVICE_KEY_NAME}`를 설정하면 조회할 수 있습니다.")
         return
 
     result = result.copy()
-    latest = max(result["period"])
-    latest_rows = result[result["period"] == latest]
-    # 2·4·6자리 조회는 월별 합계가 한 행이어야 하나, 혹시 여러 행이면 안전하게 합산한다.
-    summary = latest_rows[["export_usd", "import_usd", "balance_usd"]].sum()
+    # 2·4·6자리 조회가 여러 행으로 반환되어도 선택 월의 값으로 안전하게 합산한다.
+    summary = result[["export_usd", "import_usd", "balance_usd"]].sum()
     hs_names = [name for name in result["hs_name"].dropna().astype(str).unique() if name]
     st.markdown(f"#### HS {hs_code} · {hs_names[0] if hs_names else '공식 명칭 미제공'}")
+    st.caption(f"조회 기준: {_period_label(hs_period)}")
 
     try:
         mapping = load_mti_mapping(MTI_MAPPING_XLSX)
@@ -286,12 +258,15 @@ def hs_tab(latest_period: str) -> None:
         st.caption("관련 MTI 품목은 공식 2026 MTI-HSK 연계표를 넣은 뒤 표시됩니다.")
 
     columns = st.columns(3)
-    columns[0].metric("최신 월 수출", usd_100m(float(summary["export_usd"])))
-    columns[1].metric("최신 월 수입", usd_100m(float(summary["import_usd"])))
-    columns[2].metric("최신 월 무역수지", usd_100m(float(summary["balance_usd"])))
-    monthly = result.groupby("period", as_index=False)[["export_usd", "import_usd", "balance_usd"]].sum()
-    trade_charts(monthly, f"HS {hs_code} 월별 수출입")
-    st.download_button("HS 조회결과 CSV 다운로드", csv_bytes(result), f"hs_{hs_code}_trade.csv", "text/csv")
+    columns[0].metric("조회월 수출", usd_100m(float(summary["export_usd"])))
+    columns[1].metric("조회월 수입", usd_100m(float(summary["import_usd"])))
+    columns[2].metric("조회월 무역수지", usd_100m(float(summary["balance_usd"])))
+    st.download_button(
+        "HS 조회결과 CSV 다운로드",
+        csv_bytes(result),
+        f"hs_{hs_code}_{str(hs_period).replace('-', '')}.csv",
+        "text/csv",
+    )
 
 
 def main() -> None:
@@ -325,15 +300,21 @@ def main() -> None:
     with total_tab:
         st.subheader("전체 무역")
         if monthly.empty:
-            st.warning("전체무역 과거자료가 없습니다. GitHub Actions에서 최초 구축을 실행해 주세요.")
+            st.warning("전체무역 최근 5년 자료가 없습니다. GitHub Actions에서 최초 구축을 실행해 주세요.")
         else:
             latest_total = max(monthly["period"])
             st.caption(f"최신 기준: {_period_label(latest_total)}")
             latest_metrics(monthly, latest_total)
             selection = st.radio("월별 조회기간", ["최근 12개월", "최근 5년"], horizontal=True, key="total_period")
             months = 12 if selection == "최근 12개월" else 60
-            trade_charts(recent_months(monthly, months), f"{selection} 월별 수출입")
-            long_term_chart(monthly)
+            selected = recent_months(monthly, months)
+            trade_charts(selected, f"{selection} 월별 수출입")
+            st.download_button(
+                "전체 무역 CSV 다운로드",
+                csv_bytes(selected),
+                f"trade_total_{months}months.csv",
+                "text/csv",
+            )
 
     with industry_tab:
         st.subheader("20대 주요 품목")

@@ -22,7 +22,7 @@ Value: 공공데이터포털 일반인증키
 
 GitHub Actions의 `GITHUB_TOKEN` 권한은 워크플로의 `permissions: contents: write`로 제한되어 있습니다.
 
-## 3. 최초 과거자료 구축
+## 3. 최근 5년 자료 최초 구축
 
 `data/mti_hsk_mapping.xlsx`를 공식 2026 HSK–MTI 연계표로 교체한 뒤:
 
@@ -32,7 +32,7 @@ GitHub Actions의 `GITHUB_TOKEN` 권한은 워크플로의 `permissions: content
 4. 공식 연계표가 아직 없다면 `skip_industries=true`로 먼저 전체·지역만 구축
 5. 실행 결과가 성공하면 갱신된 CSV와 상태 JSON이 자동 커밋되었는지 확인
 
-전체 장기 시계열은 기본 1965년 1월부터 조회합니다. 제공기관의 실제 가용 시작월이 더 늦으면 유효한 월만 저장됩니다.
+별도 시작월을 입력하지 않으며, 실행 시점의 최신 완료월부터 거슬러 최근 60개월만 조회·저장합니다.
 
 ## 4. 월별 자동 갱신
 
@@ -40,7 +40,8 @@ GitHub Actions의 `GITHUB_TOKEN` 권한은 워크플로의 `permissions: content
 
 자료가 제공되면:
 
-- 최근 3개월을 다시 조회
+- 전체·지역은 최근 3개월을 다시 조회
+- 대용량 HSK 원자료는 새 대상월만 조회해 20대 품목으로 집계
 - 데이터 형식, 중복, 음수 금액, 무역수지를 검증
 - 정상인 경우에만 기존 CSV 교체
 - 기존 CSV는 실행 환경에서 최근 3개까지 백업
@@ -56,7 +57,7 @@ GitHub Actions의 `GITHUB_TOKEN` 권한은 워크플로의 `permissions: content
 DATA_GO_KR_SERVICE_KEY = "공공데이터포털 일반인증키"
 ```
 
-4. 재부팅 후 HS 상세조회에서 2·4·6자리 코드로 확인
+4. 재부팅 후 HS 상세조회에서 2·4·6자리 코드와 조회월 하나를 선택해 확인
 
 ## 6. 장애 확인
 
@@ -67,4 +68,3 @@ DATA_GO_KR_SERVICE_KEY = "공공데이터포털 일반인증키"
 - CI 실패: `pytest -q`를 로컬에서 실행하고 CSV 헤더·지역 그룹 중복·비밀파일 포함 여부 확인
 
 오류 메시지에는 인증키나 전체 요청 주소가 들어가지 않도록 구현되어 있습니다.
-

@@ -28,14 +28,6 @@ def recent_months(frame: pd.DataFrame, months: int) -> pd.DataFrame:
     return frame[frame["period"].astype(str).isin(keep)].copy()
 
 
-def annual_total(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame(columns=["year", "export_usd", "import_usd", "balance_usd"])
-    data = frame.copy()
-    data["year"] = data["period"].astype(str).str[:4]
-    return data.groupby("year", as_index=False)[["export_usd", "import_usd", "balance_usd"]].sum().sort_values("year")
-
-
 def csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8-sig")
 

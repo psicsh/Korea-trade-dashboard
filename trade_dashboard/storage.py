@@ -107,6 +107,15 @@ def merge_trade_frames(existing: pd.DataFrame, incoming: pd.DataFrame, kind: str
     return combined.sort_values(keys).reset_index(drop=True)
 
 
+def retain_recent_months(frame: pd.DataFrame, months: int = 60) -> pd.DataFrame:
+    """분류별 행 수와 관계없이 가장 최근 연월만 보존한다."""
+    if frame.empty:
+        return frame.copy()
+    periods = sorted(frame["period"].dropna().astype(str).unique())
+    keep = set(periods[-months:])
+    return frame[frame["period"].astype(str).isin(keep)].copy()
+
+
 def _backup_existing(path: Path, keep: int = 3) -> Path | None:
     if not path.exists() or path.stat().st_size == 0:
         return None
@@ -145,9 +154,10 @@ def atomic_write_csv(path: Path, frame: pd.DataFrame, kind: str) -> bool:
         temp_path.unlink(missing_ok=True)
 
 
-def merge_and_write_csv(path: Path, incoming: pd.DataFrame, kind: str) -> bool:
+def merge_and_write_csv(path: Path, incoming: pd.DataFrame, kind: str, *, max_months: int = 60) -> bool:
     existing = read_trade_csv(path, kind)
     merged = merge_trade_frames(existing, incoming, kind)
+    merged = retain_recent_months(merged, max_months)
     return atomic_write_csv(path, merged, kind)
 
 

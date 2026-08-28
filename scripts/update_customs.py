@@ -18,7 +18,7 @@ from trade_dashboard.config import (
 from trade_dashboard.mti import aggregate_industries, load_major_codes, load_mti_mapping
 from trade_dashboard.regions import aggregate_regions, load_region_groups
 from trade_dashboard.storage import atomic_write_json, merge_and_write_csv
-from trade_dashboard.utils import latest_complete_month, period_range, shift_month
+from trade_dashboard.utils import latest_complete_month, shift_month
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,16 +68,15 @@ def main() -> int:
             mapping = load_mti_mapping(MTI_MAPPING_XLSX)
             major = load_major_codes(MTI_MAJOR_CSV)
             frames = []
-            months = period_range(start, args.target)
-            for index, month in enumerate(months, start=1):
-                log(f"20대 품목 {month} 재검증 ({index}/{len(months)})")
-                hs_rows = client.fetch_hs(month, month)
-                if hs_rows.empty:
-                    raise RuntimeError(f"{month} 전체 HSK 자료가 비어 있습니다.")
-                aggregated = aggregate_industries(hs_rows, mapping, major)
-                if aggregated.empty:
-                    raise RuntimeError(f"{month} 20대 품목 집계 결과가 비어 있습니다.")
-                frames.append(aggregated)
+            # 전체 HSK 응답은 크므로 20대 품목은 새 대상월만 한 번 수집한다.
+            log(f"20대 품목 {args.target} 갱신")
+            hs_rows = client.fetch_hs(args.target, args.target)
+            if hs_rows.empty:
+                raise RuntimeError(f"{args.target} 전체 HSK 자료가 비어 있습니다.")
+            aggregated = aggregate_industries(hs_rows, mapping, major)
+            if aggregated.empty:
+                raise RuntimeError(f"{args.target} 20대 품목 집계 결과가 비어 있습니다.")
+            frames.append(aggregated)
             industries = concat(frames)
             industry_note = "완료"
         except (FileNotFoundError, ValueError) as exc:

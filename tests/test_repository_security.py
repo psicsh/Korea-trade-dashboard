@@ -25,3 +25,10 @@ def test_repository_contains_no_probable_service_key_literal():
 def test_no_num_of_rows_parameter():
     source = (ROOT / "trade_dashboard" / "api.py").read_text(encoding="utf-8")
     assert "numOfRows" not in source
+
+
+def test_bootstrap_does_not_request_full_history():
+    workflow = (ROOT / ".github" / "workflows" / "update_customs.yml").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts" / "bootstrap_history.py").read_text(encoding="utf-8")
+    assert "1965-01" not in workflow + bootstrap
+    assert "total_start" not in workflow + bootstrap

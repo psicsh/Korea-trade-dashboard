@@ -8,6 +8,7 @@ from trade_dashboard.storage import (
     empty_frame,
     merge_trade_frames,
     read_trade_csv,
+    retain_recent_months,
     validate_trade_frame,
 )
 
@@ -54,3 +55,11 @@ def test_invalid_balance_rejected():
     frame.loc[0, "balance_usd"] = 999
     with pytest.raises(ValueError, match="무역수지"):
         validate_trade_frame(frame, "monthly")
+
+
+def test_only_latest_60_months_are_retained():
+    periods = pd.period_range("2021-07", periods=61, freq="M")
+    frames = [monthly_row(period=f"{period.year:04d}-{period.month:02d}") for period in periods]
+    retained = retain_recent_months(pd.concat(frames, ignore_index=True), 60)
+    assert retained["period"].nunique() == 60
+    assert retained["period"].min() == "2021-08"

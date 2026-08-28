@@ -23,22 +23,16 @@ from trade_dashboard.utils import latest_complete_month, period_range, shift_mon
 
 def parse_args() -> argparse.Namespace:
     latest = latest_complete_month()
-    parser = argparse.ArgumentParser(description="한국무역 대시보드 최초 과거자료 구축")
+    parser = argparse.ArgumentParser(description="한국무역 대시보드 최근 5년 자료 구축")
     parser.add_argument("--end", default=latest, help="종료월(YYYY-MM), 기본값: 전월")
-    parser.add_argument("--total-start", default="1965-01", help="전체무역 시작월")
-    parser.add_argument("--region-start", default=shift_month(latest, -59), help="9대 지역 시작월")
-    parser.add_argument(
-        "--industry-start",
-        default=max("2022-01", shift_month(latest, -59)),
-        help="20대 품목 시작월. 2026 MTI 개편 소급 공식자료는 2022년부터 권장",
-    )
     parser.add_argument("--skip-industries", action="store_true", help="20대 품목 최초 구축 생략")
     return parser.parse_args()
 
 
 def fetch_total(client, start: str, end: str):
     frames = []
-    for chunk_start, chunk_end in month_chunks(start, end, size=120):
+    # 최근 5년도 관세청 응답 부담을 줄이기 위해 1년씩 조회한다.
+    for chunk_start, chunk_end in month_chunks(start, end, size=12):
         log(f"전체무역 {chunk_start}~{chunk_end} 조회")
         frames.append(client.fetch_total(chunk_start, chunk_end))
     return concat(frames)
@@ -81,13 +75,14 @@ def main() -> int:
     args = parse_args()
     client = client_from_environment()
     changed: dict[str, bool] = {}
+    start = shift_month(args.end, -59)
 
-    monthly = fetch_total(client, args.total_start, args.end)
+    monthly = fetch_total(client, start, args.end)
     if monthly.empty or args.end not in set(monthly["period"]):
         raise RuntimeError("종료월 전체무역 자료를 받지 못했습니다.")
     changed["monthly"] = merge_and_write_csv(MONTHLY_CSV, monthly, "monthly")
 
-    regions = fetch_regions(client, args.region_start, args.end)
+    regions = fetch_regions(client, start, args.end)
     if regions.empty:
         raise RuntimeError("9대 지역 자료를 받지 못했습니다.")
     changed["region"] = merge_and_write_csv(REGION_CSV, regions, "region")
@@ -96,7 +91,8 @@ def main() -> int:
         changed["industry"] = False
         industry_note = "사용자 선택으로 생략"
     else:
-        industries = fetch_industries(client, args.industry_start, args.end)
+        industry_start = max("2022-01", start)
+        industries = fetch_industries(client, industry_start, args.end)
         if industries.empty:
             raise RuntimeError("20대 품목 자료를 만들지 못했습니다.")
         changed["industry"] = merge_and_write_csv(INDUSTRY_CSV, industries, "industry")
@@ -107,6 +103,7 @@ def main() -> int:
         "mode": "bootstrap",
         "checked_at_utc": datetime.now(timezone.utc).isoformat(),
         "target_period": args.end,
+        "start_period": start,
         "changed": changed,
         "industry": industry_note,
     }
