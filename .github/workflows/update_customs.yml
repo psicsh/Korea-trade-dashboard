@@ -79,3 +79,4 @@ jobs:
             git commit -m "data: update customs trade statistics"
             git push
           fi
+
