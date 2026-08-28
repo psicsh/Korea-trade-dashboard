@@ -1,4 +1,13 @@
 {
-  "status": "not_initialized",
-  "message": "GitHub Actions에서 최초 과거자료 구축을 실행해 주세요."
+  "status": "success",
+  "mode": "bootstrap",
+  "checked_at_utc": "2026-08-28T07:53:33.178805+00:00",
+  "target_period": "2026-07",
+  "start_period": "2021-08",
+  "changed": {
+    "monthly": true,
+    "region": true,
+    "industry": true
+  },
+  "industry": "완료"
 }
