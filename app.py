@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from trade_dashboard.api import PublicDataClient, PublicDataError
+from trade_dashboard.api import PublicDataClient, PublicDataError, PublicDataTemporaryError
 from trade_dashboard.config import (
     APP_NAME,
     APP_VERSION,
@@ -112,7 +112,6 @@ def trade_charts(frame: pd.DataFrame, title: str) -> None:
             ],
         )
         .properties(height=330)
-        .interactive()
     )
     balance = (
         alt.Chart(data, title="월별 무역수지")
@@ -148,9 +147,9 @@ def latest_metrics(frame: pd.DataFrame, period: str) -> None:
         return f"전년동월 대비 {rate:+.1f}%"
 
     columns = st.columns(3)
-    columns[0].metric("수출", usd_100m(float(current["export_usd"])), delta("export_usd"))
-    columns[1].metric("수입", usd_100m(float(current["import_usd"])), delta("import_usd"))
-    columns[2].metric("무역수지", usd_100m(float(current["balance_usd"])))
+    columns[0].metric("수출", usd_100m(float(current["export_usd"])), delta("export_usd"), border=True)
+    columns[1].metric("수입", usd_100m(float(current["import_usd"])), delta("import_usd"), border=True)
+    columns[2].metric("무역수지", usd_100m(float(current["balance_usd"])), border=True)
 
 
 def comparison_table(frame: pd.DataFrame, period: str, code_col: str, name_col: str) -> pd.DataFrame:
@@ -231,6 +230,11 @@ def hs_tab(latest_period: str) -> None:
                 st.session_state["hs_result"] = result
                 st.session_state["hs_code"] = hs_code
                 st.session_state["hs_period"] = selected_period
+        except PublicDataTemporaryError:
+            st.error(
+                "관세청 실시간 HS 조회 서버가 일시적으로 응답하지 않습니다. "
+                "저장된 전체 무역·20대 품목·9대 지역 자료에는 영향이 없으므로 잠시 후 다시 조회해 주세요."
+            )
         except (ValueError, PublicDataError) as exc:
             st.error(str(exc))
 
@@ -258,9 +262,9 @@ def hs_tab(latest_period: str) -> None:
         st.caption("관련 MTI 품목은 공식 2026 MTI-HSK 연계표를 넣은 뒤 표시됩니다.")
 
     columns = st.columns(3)
-    columns[0].metric("조회월 수출", usd_100m(float(summary["export_usd"])))
-    columns[1].metric("조회월 수입", usd_100m(float(summary["import_usd"])))
-    columns[2].metric("조회월 무역수지", usd_100m(float(summary["balance_usd"])))
+    columns[0].metric("조회월 수출", usd_100m(float(summary["export_usd"])), border=True)
+    columns[1].metric("조회월 수입", usd_100m(float(summary["import_usd"])), border=True)
+    columns[2].metric("조회월 무역수지", usd_100m(float(summary["balance_usd"])), border=True)
     st.download_button(
         "HS 조회결과 CSV 다운로드",
         csv_bytes(result),
