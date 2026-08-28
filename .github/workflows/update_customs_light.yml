@@ -1,0 +1,76 @@
+name: 관세청 무역자료 갱신 (경량형 v1)
+
+on:
+  schedule:
+    # 매월 15~22일 00:15 UTC = 09:15 KST
+    - cron: "15 0 15-22 * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "실행 방식"
+        required: true
+        default: update
+        type: choice
+        options:
+          - update
+          - bootstrap
+      skip_industries:
+        description: "20대 품목 구축/갱신 생략"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: customs-data-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check secret configuration
+        run: |
+          if [ -z "$DATA_GO_KR_SERVICE_KEY" ]; then
+            echo "::error::GitHub Actions Secret DATA_GO_KR_SERVICE_KEY를 설정해 주세요."
+            exit 1
+          fi
+      - name: Bootstrap recent five years
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'bootstrap' }}
+        run: |
+          args=()
+          if [ "${{ inputs.skip_industries }}" = "true" ]; then
+            args+=(--skip-industries)
+          fi
+          python scripts/bootstrap_history.py "${args[@]}"
+      - name: Incremental update
+        if: ${{ github.event_name == 'schedule' || inputs.mode != 'bootstrap' }}
+        run: |
+          args=()
+          if [ "${{ inputs.skip_industries }}" = "true" ]; then
+            args+=(--skip-industries)
+          fi
+          python scripts/update_customs.py "${args[@]}"
+      - name: Commit validated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/trade_monthly.csv data/trade_industry.csv data/trade_region.csv data/update_status.json
+          if git diff --cached --quiet; then
+            echo "변경된 검증 자료가 없습니다."
+          else
+            git commit -m "data: update customs trade statistics"
+            git push
+          fi
