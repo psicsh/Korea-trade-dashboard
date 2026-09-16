@@ -1,9 +1,8 @@
 {
   "status": "success",
-  "mode": "bootstrap",
-  "checked_at_utc": "2026-08-28T07:53:33.178805+00:00",
-  "target_period": "2026-07",
-  "start_period": "2021-08",
+  "mode": "monthly-update",
+  "checked_at_utc": "2026-09-16T00:32:57.641060+00:00",
+  "target_period": "2026-08",
   "changed": {
     "monthly": true,
     "region": true,
