@@ -1,12 +1,12 @@
 {
   "status": "success",
   "mode": "monthly-update",
-  "checked_at_utc": "2026-09-18T00:32:45.997486+00:00",
-  "target_period": "2026-08",
+  "checked_at_utc": "2026-10-15T00:51:58.476625+00:00",
+  "target_period": "2026-09",
   "changed": {
-    "monthly": false,
-    "region": false,
-    "industry": false
+    "monthly": true,
+    "region": true,
+    "industry": true
   },
   "industry": "완료"
 }
